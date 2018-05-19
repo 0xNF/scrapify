@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 import json
+import re
 
 user = 'nishumvar'
 scopes = "playlist-read-private playlist-read-collaborative user-follow-read user-library-read \
@@ -15,7 +16,43 @@ sp = Spotify()
 dbname = "tpy.db"
 db = None
 
+conn = sqlite3.connect(dbname)
+
+
+# List of Directories to create and write json data to.
+# Organized by Type. i.e.
+# Playlists/{Playlist}/Tracks/{Tracks}
+# Artists/{Artist}/Tracks/{Tracks}
+#etc
 dirs = {}
+
+#Maps of which ResourceIds, organized by Type, that we've already seen and collected.   
+CollectedArtists = {}
+CollectedAlbums = {}
+CollectedPlaylists = {}
+CollectedTracks = {}
+
+# Queued resources
+QueuedArists = []
+QueuedAlbums = []
+QueuedPlaylists = []
+QueuedTracks = []
+
+# in-memory mappings
+# format of:
+#       {id : [list of ids]}
+ArtistTrackMap = {}
+ArtistAlbumMap = {}
+AlbumTrackMap = {}
+UserPlaylistMap = {}
+UserSavedTracks = {} # userid: (added_at, trackid)
+
+
+
+
+def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split(_nsre, s)] 
 
 def ScrapeSetup():
     dirSetup(os.getcwd(), 'raw')
@@ -163,18 +200,171 @@ def GetFullPlaylistTracks():
         else:
             Cont = GetPlaylistsTracks(pl[0], pl[1])
 
-def AcquireInitialJson():
-    #GetAllPage(sp.current_user_saved_tracks, "Saved Tracks", "savedtracks")
-    #GetAllPage(sp.current_user_saved_albums, "Saved Albums", "savedalbums")
-    #GetAllPage(sp.current_user_playlists, "Saved Playlists", "playlists")
-    #GetFullPlaylists()
-    #GetFullPlaylistTracks()
+Artists_InsertedAsSimple = []
+def InsertArtist(artist):
+    q = "INSERT OR IGNORE INTO Artists \
+        (ArtistId, Genres, Href, Name, Popularity, Uri) \
+        VALUES (?, ?, ?, ?, ?, ?);"    
+    aid = artist["id"] 
+    genre = artist["genres"] if "genres" in artist else []    
+    href = artist["href"] if "href" in artist else ""
+    name = artist["name"] if "name" in artist else ""
+    pop = artist["popularity"] if "popularity" in artist else 0
+    uri = artist["uri"] if "uri" in artist else ""
+    values = (artist["id"], genre, href, name, pop, uri)
+    conn.execute(q, values)
+
+    # external urls
+    eu = artist["external_urls"]
+    if eu is not None:
+        q2 = "INSERT INTO External_Urls \
+            (ResourceId, Type, Key, Value) \
+            VALUES (?, ?, ?, ?);"
+        valArr = []
+        for key in eu.keys():
+            val = eu[key]
+            tup = (aid, artist["type"], key, val)
+            valArr.append(tup)
+        conn.executemany(q2, valArr)        
+        conn.commit()
+
+    # external ids
+    ei = artist["external_ids"]
+    if ei is not None:
+        q3 = "INSERT INTO External_Ids \
+            (ResourceId, Type, Key, Value) \
+            VALUES (?, ?, ?, ?);"
+        valArr2 = []
+        for key in ei.keys():
+            val = ei[key]
+            tup = (aid, artist["type"], key, val)
+            valArr.append(tup)
+        conn.executemany(q3, valArr2)        
+        conn.commit()            
+
+    Artists_InsertedAsSimple.append(aid)
     return
+    
+
+def GetSavedSongs(fname):
+    # path = os.path.join(dirs["savedtracks"],fname)
+    # with open(path, 'r') as f:
+    #     j = json.load(f)
+    #     items = j["items"]
+    #     if items is not None:
+    #         for saved in items:
+    #             added_at = saved["added_at"]
+    #             artists = saved["track"]["artists"]
+    #             trackid = saved["track"]["id"]
+    #             if artists is not None:
+    #                 for artist in artists:
+    #                     aid = artist["id"] # id
+    #                     rid = artist["uri"] #resource uri
+    #                     if aid not in CollectedArtists: #if not seem before, make sure we get the full details later
+    #                         QueuedArists.append(aid)
+    #                     if aid not in ArtistTrackMap: #Can't add to db yet because foreign key constraints
+    #                         ArtistTrackMap[aid] = [trackid]
+    #                     elif trackid not in ArtistTrackMap[aid]: #
+    #                         ArtistTrackMap[aid].append(trackid)                        
+                        
+
+    return
+
+def AcquireInitialJson():
+    GetAllPage(sp.current_user_saved_tracks, "Saved Tracks", "savedtracks")
+    GetAllPage(sp.current_user_saved_albums, "Saved Albums", "savedalbums")
+    GetAllPage(sp.current_user_playlists, "Saved Playlists", "playlists")
+    GetFullPlaylists()
+    GetFullPlaylistTracks()
+    return
+
+
+def RecurseParse(kind):
+    if kind == "SavedSongs":
+        listOfSavedSongFiles = os.listdir(dirs["savedtracks"])
+        listOfSavedSongFiles.sort(key=natural_sort_key)
+        for j in listOfSavedSongFiles:
+            GetSavedSongs(j)
+            break
+    elif kind == "SavedAlbums":
+        pass
+    return
+
+def ConstructInsertExternalTuples(externalurls, resourceid, type):
+    insertVals = []
+    if externalurls is not None:
+        for key in externalurls.keys():
+            val = externalurls[key]
+            tup = (resourceid, type, key, val)
+            insertVals.append(tup)
+    return insertVals
+
+def ConstructFollowerTuples(followerobj, resourceid, type):
+    insertVals = []
+    if followerobj is not None:
+        insertVals.append((resourceid, type, followerobj["href"], followerobj["total"]))
+    return insertVals
+        
+
+# Can't insert Saved Tracks without a User present.
+def GetUser():
+    resourceType = "user"
+    user = sp.current_user()
+    c = conn.cursor()
+    c.execute("SELECT * FROM Users WHERE UserId = ?", (user["id"],))
+    res = c.fetchone()
+    if res is None or len(res) == 0:
+        print ("No User entry in db for current user")
+        q = "INSERT INTO Users (UserId, DisplayName, Href, Uri, Birthdate, Country, Email, Product) \
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        uid = user["id"]
+        uri = user["uri"] if "uri" in user else "spotify:user:{}".format(uid)
+        birthdate = user["birthdate"] if "birthdate" in user else None
+        email = user["email"] if "email" in user else None
+        href = user["href"] if "href" in user else "https://api.spotify.com/v1/users/{}".format(uid)
+        followers = user["followers"] if "followers" in user else []
+        displayname = user["display_name"] if "display_name" in user else None
+        country = user["country"] if "country" in user else None
+        product = user["product"] if "product" in user else None
+        eu = user["external_urls"] if "external_urls" in user else None
+        ei = user["external_ids"] if "external_ids" in user else None
+
+        # User Insert
+        userinsertvals = (uid, displayname, href, uri, birthdate, country, email, product)
+        c.execute(q, userinsertvals)
+
+        # External Urls
+        urlTuples = ConstructInsertExternalTuples(eu, uid, resourceType)
+        if urlTuples is not None and len(urlTuples) > 0:
+            q2 = "INSERT INTO External_Urls (ResourceId, Type, Key, Value) \
+                    VALUES (?, ?, ?, ?);"
+            c.executemany(q2, urlTuples)
+        
+        # External Ids
+        idTuples = ConstructInsertExternalTuples(ei, uid, resourceType)
+        if idTuples is not None and len(idTuples) > 0:
+            q2 = "INSERT INTO External_Ids (ResourceId, Type, Key, Value) \
+                    VALUES (?, ?, ?, ?);"
+            c.executemany(q2, urlTuples)
+
+        # Followers
+        followTuple = ConstructFollowerTuples(followers, uid, resourceType)
+        if followTuple is not None and len(followTuple) > 0:
+            q3 = "INSERT INTO Followers (ResourceId, Type, Href, Total) \
+                   VALUES (?, ?, ?, ?);"
+            c.executemany(q3, followTuple)        
+        conn.commit()
+    else:
+        print ("Current user already existed in database.")
+    return
+
 
 def main():
     RefreshSpotifyTokens()
     ScrapeSetup()
+    GetUser()
     #AcquireInitialJson()
+    RecurseParse("SavedSongs")
     return
 
 if __name__ == '__main__':
