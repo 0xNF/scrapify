@@ -18,6 +18,7 @@ db = None
 
 conn = sqlite3.connect(dbname)
 
+ROrder = 1
 
 # List of Directories to create and write json data to.
 # Organized by Type. i.e.
@@ -27,16 +28,23 @@ conn = sqlite3.connect(dbname)
 dirs = {}
 
 #Maps of which ResourceIds, organized by Type, that we've already seen and collected.   
-CollectedArtists = {}
-CollectedAlbums = {}
-CollectedPlaylists = {}
-CollectedTracks = {}
+CollectedArtists = []
+CollectedAlbums = []
+CollectedPlaylists = []
+CollectedTracks = []
+CollectedSavedTracks = []
+CollectedSavedAlbums = []
+CollectedUsers = []
 
-# Queued resources
+# Queued resource ids to fetch Full versions of, and then append to StagedToAdd
 QueuedArists = []
 QueuedAlbums = []
 QueuedPlaylists = []
 QueuedTracks = []
+QueuedSavedTracks = []
+QueuedSavedAlbums = []
+QueuedPlaylistTracks = []
+QueuedUsers = []
 
 # in-memory mappings
 # format of:
@@ -45,10 +53,38 @@ ArtistTrackMap = {}
 ArtistAlbumMap = {}
 AlbumTrackMap = {}
 UserPlaylistMap = {}
-UserSavedTracks = {} # userid: (added_at, trackid)
+UserSavedTracks = {}# [(added_at, trackid)
 
+# Fully realized Json objects of items to add to respective tables
+# Items moved from StagedToAdd get their ids appended to the appropriate Collected list
+StagedToAdd_Tracks = []
+StagedToAdd_Albums = []
+StagedToAdd_Artists = []
+StagedToAdd_SavedTracks = []
+StagedToAdd_Playlists = []
+StagedToAdd_PlaylistTracks = []
+StagedToAdd_SavedAlbums = []
+StagedToAdd_Users = []
 
+def PopulateAlreadySeenItems():
+    CollectedArtists = populate("ArtistId", "Artists")
+    CollectedAlbums = populate("AlbumId", "Albums")
+    CollectedPlaylists = populate("PlaylistId", "Playlists")
+    CollectedTracks = populate("TrackId", "Tracks")
+    CollectedUsers = populate("UserId", "Users")
+    return
 
+def populate(pkey, table):
+    c = conn.cursor()
+    q = "SELECT ? FROM {};".format(table)
+    vals = (pkey,)
+    c.execute(q, vals)
+    ids = []
+    for res in c.fetchall():
+        ids.append(res)
+    c.close()
+    print("Found {} {} already fully populated in".format(len(ids), table))
+    return ids
 
 def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
     return [int(text) if text.isdigit() else text.lower()
@@ -95,14 +131,15 @@ def SaveJson(dir, fname, data):
         
 def RefreshSpotifyTokens():
     global sp, ccm
-    if not os.path.exists('./.cache-'+user):
+    cachefname = './.cache-{}'.format(user)
+    if not os.path.exists(cachefname):
         access = util.prompt_for_user_token(user, scopes)
         sp = Spotify(auth=access['access_token'])
         return
     elif ccm is None:
         ccm = oauth2.SpotifyOAuth(
             os.getenv("SPOTIPY_CLIENT_ID"), os.getenv("SPOTIPY_CLIENT_SECRET"), os.getenv("SPOTIPY_REDIRECT_URI"), 
-            cache_path='./.cache-nishumvar', scope=scopes)
+            cache_path=cachefname, scope=scopes)
     access = ccm.get_cached_token()
     sp = Spotify(auth=access['access_token'])
     return
@@ -246,29 +283,94 @@ def InsertArtist(artist):
     return
     
 
-def GetSavedSongs(fname):
-    # path = os.path.join(dirs["savedtracks"],fname)
-    # with open(path, 'r') as f:
-    #     j = json.load(f)
-    #     items = j["items"]
-    #     if items is not None:
-    #         for saved in items:
-    #             added_at = saved["added_at"]
-    #             artists = saved["track"]["artists"]
-    #             trackid = saved["track"]["id"]
-    #             if artists is not None:
-    #                 for artist in artists:
-    #                     aid = artist["id"] # id
-    #                     rid = artist["uri"] #resource uri
-    #                     if aid not in CollectedArtists: #if not seem before, make sure we get the full details later
-    #                         QueuedArists.append(aid)
-    #                     if aid not in ArtistTrackMap: #Can't add to db yet because foreign key constraints
-    #                         ArtistTrackMap[aid] = [trackid]
-    #                     elif trackid not in ArtistTrackMap[aid]: #
-    #                         ArtistTrackMap[aid].append(trackid)                        
-                        
-
+# The goal of any ParseToQueue function is to assemble either:
+# a) the full JObject of an item ready for inserting into the Database, or
+# b) IDs of related items that need to be queued and then parsed themselves.
+def ParseSavedSongsToQueue(fname):
+    path = os.path.join(dirs["savedtracks"],fname)
+    with open(path, 'r') as f:
+        j = json.load(f)
+        items = j["items"]
+        if items is not None:
+            for saved in items:
+                track = saved["track"]
+                trackid = track["id"]
+                added_at = saved["added_at"]
+                artists = track["artists"]
+                album = track["album"]
+                if trackid not in CollectedTracks and trackid not in QueuedTracks:                    
+                    StagedToAdd_Tracks.append(track)
+                    CollectedTracks.append(trackid) #set-like record of ids
+                if trackid not in CollectedSavedTracks and trackid not in QueuedSavedTracks:
+                    StagedToAdd_SavedTracks.append((trackid, added_at))
+                    CollectedSavedTracks.append(trackid) #set-like record of ids
+                if artists is not None:
+                    for artist in artists:
+                        artistId = artist["id"] # id
+                        if artistId not in CollectedArtists and artistId not in QueuedArists:
+                            QueuedArists.append(artistId) #set-like record of ids
+                            # does not get appended to StagedToAdd_Artist because
+                            # this is a Simple Artist. We need to get the Full Artist.
+                if album is not None:
+                    albumId = album["id"]
+                    if albumId not in CollectedAlbums and albumId not in QueuedAlbums:
+                        QueuedAlbums.append(albumId) #set-like record of ids
+                        # does not get appened to StageToAdd_Album because
+                        # this is a Simple Album. We need the Full Album.
     return
+
+def ParseSavedAlbumsToQueue(fname):
+    path = os.path.join(dirs["savedalbums"],fname)
+    with open(path, 'r') as f:
+        j = json.load(f)
+        items = j["items"]
+        if items is not None:
+            for saved in items:
+                added_at = saved["added_at"]
+                album = saved["album"]
+                albumid = album["id"]
+                artists = album["artists"]
+                if albumid not in CollectedAlbums and albumid not in QueuedAlbums:
+                    StagedToAdd_Albums.append(album)
+                    #Not added to Queued because it is a Full item
+                if albumid not in CollectedSavedAlbums and albumid not in QueuedSavedAlbums:
+                    StagedToAdd_SavedAlbums.append((albumid, added_at))
+                    #Not added to queued because it is a Full item
+                if artists is not None:
+                    for artist in artists:
+                        artistId = artist["id"] # id
+                        if artistId not in CollectedArtists and artistId not in QueuedArists:
+                            QueuedArists.append(artistId) #set-like record of ids
+                            # does not get appended to StagedToAdd_Artist because
+                            # this is a Simple Artist. We need to get the Full Artist.
+                tracks = album["tracks"]["items"]
+                if tracks is not None:
+                    for track in tracks:
+                        trackid = track["id"]
+                        if trackid not in CollectedTracks:
+                            CollectedTracks.append(trackid)
+                        # TODO Some Mapping of Album : Song, because its a Full Track
+    return
+
+def ParsePlaylistTracksToQueue(fname):
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        items = j["items"]
+        if items is not None:
+            for pto in items:
+                added_at = pto["added_at"]
+                added_by = pto["added_by"] # Public User Object
+                userid = added_by["id"]
+                track = pto["track"]
+                trackid = track["id"]
+                if userid not in CollectedUsers and userid not in QueuedUsers:
+                    QueuedUsers.append(added_by)
+                if trackid not in CollectedTracks and trackid not in QueuedTracks:
+                    StagedToAdd_Tracks.append(track) #these are full trackd
+                    CollectedTracks.append(trackid)
+                # TODO some mapping of Playlist : PlaylistTrack
+    return
+
 
 def AcquireInitialJson():
     GetAllPage(sp.current_user_saved_tracks, "Saved Tracks", "savedtracks")
@@ -284,10 +386,23 @@ def RecurseParse(kind):
         listOfSavedSongFiles = os.listdir(dirs["savedtracks"])
         listOfSavedSongFiles.sort(key=natural_sort_key)
         for j in listOfSavedSongFiles:
-            GetSavedSongs(j)
-            break
+            ParseSavedSongsToQueue(j)
+             # break #TODO get rid of this later. Only for testing
     elif kind == "SavedAlbums":
+        listofSavedAlbumFiles = os.listdir(dirs["savedalbums"])
+        listofSavedAlbumFiles.sort(key=natural_sort_key)
+        for j in listofSavedAlbumFiles:
+            ParseSavedAlbumsToQueue(j)
+             # break #TODO get rid of this later. Only for testing
         pass
+    elif kind == "PlaylistTracks":
+        listOfPlaylists = os.listdir(dirs["playlists"])
+        for pl in listOfPlaylists:
+            listofPTOs = os.listdir(os.path.join(dirs["playlists"], pl, "tracks"))
+            listofPTOs.sort(key=natural_sort_key)
+            for ptopage in listofPTOs:
+                p = os.path.join(dirs["playlists"], pl, "tracks", ptopage)
+                ParsePlaylistTracksToQueue(p)
     return
 
 def ConstructInsertExternalTuples(externalurls, resourceid, type):
@@ -305,6 +420,12 @@ def ConstructFollowerTuples(followerobj, resourceid, type):
         insertVals.append((resourceid, type, followerobj["href"], followerobj["total"]))
     return insertVals
         
+def ConstructImageTuple(imgArray, resourceid, type):
+    insertVals = []
+    if imgArray is not None:
+        for img in imgArray:
+            insertVals.append((resourceid, type, img["height"], img["width"], img["url"]))
+    return insertVals
 
 # Can't insert Saved Tracks without a User present.
 def GetUser():
@@ -328,6 +449,7 @@ def GetUser():
         product = user["product"] if "product" in user else None
         eu = user["external_urls"] if "external_urls" in user else None
         ei = user["external_ids"] if "external_ids" in user else None
+        images = user["images"] if "images" in user else None
 
         # User Insert
         userinsertvals = (uid, displayname, href, uri, birthdate, country, email, product)
@@ -352,7 +474,15 @@ def GetUser():
         if followTuple is not None and len(followTuple) > 0:
             q3 = "INSERT INTO Followers (ResourceId, Type, Href, Total) \
                    VALUES (?, ?, ?, ?);"
-            c.executemany(q3, followTuple)        
+            c.executemany(q3, followTuple)     
+
+        # Images
+        imageTuple = ConstructImageTuple(images, uid, resourceType)
+        if imageTuple is not None and len(imageTuple) > 0:
+            q4 = "INSERT INTO Images (ResourceId, Type, Height, Width, Url) \
+                VALUES (?, ?, ?, ?, ?);"
+            c.executemany(q4, imageTuple)  
+
         conn.commit()
     else:
         print ("Current user already existed in database.")
@@ -364,7 +494,14 @@ def main():
     ScrapeSetup()
     GetUser()
     #AcquireInitialJson()
+    PopulateAlreadySeenItems()
     RecurseParse("SavedSongs")
+    RecurseParse("SavedAlbums")
+    RecurseParse("PlaylistTracks")
+    print("Number of Queued Saved Tracks: {}".format(len(QueuedSavedTracks)))
+    print("Number of Queued Albums: {}".format(len(QueuedAlbums)))
+    print("Number of Queued Artists: {}".format(len(QueuedArists)))
+
     return
 
 if __name__ == '__main__':

@@ -1,3 +1,6 @@
+
+# 0. Create DB if not Exist
+
 # Json Intermediate Save Format = Endpoint_xxx.json
 # 1. Scrape Saved Songs until Next = Null. Save to raw/savedsongs/fname.json
 # 2. Scrape Saved Albums until Next = Null. Save to raw/savedalbums/fname.json
@@ -6,13 +9,84 @@
 # 5. For each Playlist, scrape songs until Next = Null.  Save to raw/playlists/playlistname/fname.json
 
 
+## ROrder
+## The relationship-order variable specifying how many times we fetch more data
+## 0 = Fetch and catalog only the InitialJSON items
+## 1 = Queue up any unseen or simple Artists, unseen or simple Albums, unseen or simple Playlists, SimpleTracks and catalog
+## 2 = Any further unseen or simple results from (1) go back into the Queues.
+## 3 = ^ with results from (2)
+## ...
+## N = ^ wiith results from N-1 
+
+## Needs two Caches:
+## 1) Already-Done Cache. We record the ResourceIds of items we've already completed computation on. 
+##      A) A Track is complete if it's entry in the Tracks table is full, its Album is full, and any contributing Artists are full.
+##      B) An Artist is complete if their entry in the Artist Table is full, their top-tracks is populated, and their albums are populated.
+##      C) An Album is complete if it's entry in the Album table is full, all its tracks are full, and any contributing Artists are full.
+##      D) A Playlist is complete if its entry in the Playlists table is full, and each Track is full. See above for Track Completeness.
+##
+## 2) A Queued-Fetch Cache. We record which ResourceIds we haven't Completed, and therefore need to Fetch. 
+##      We Fetch n-order relations specified by the ROrder var.
+##      A) ArtistFetchQueue (If supplied an ArtistId or a SimpleArtist)
+##      B) AlbumFetchQueue (If supplied an AlbumId or a SimpleAlbum)
+##      C) TrackFetchQueue (If supplied anything with SimpleTrack)
+##      D) PlaylistFetchQueue (if supplied a SimplePlaylist)
+
+
+# Query Current User
+# Insert if not exists User to Users Table
+
+## We build our in-memory cache from whatever the DB already has. 
+## We can be persistent between runs this way.
+# DB.SavedSongs.Where(x => x.UserId == CurrUser).Select(x => x.id).ForEach( x => SavedSongSet.add(x));
+# DB.Songs.Select(x => x.id).ForEach( x => SongSet.add(x));
+# DB.Artists.Select(x => x.id).ForEach( x => ArtistSet.add(x));
+# DB.Albums.Select(x => x.id).ForEach( x => AlbumSet.add(x));
+# DB.Playlists.Select(x => x.id).ForEach( x => PlaylistsSet.add(x));
+
+
+# For Each Saved Song...
+# Add to SavedSongSet[id] = Added_At
+# For
+# For each 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # 6. For each Saved Song:
 #       a) for each artist...
-#           1) !AlreadyDoneArtists.Contains(ArtistId) ? ArtistsDict.add(ArtistId, ResourceUrl);alreadyDoneArtsits.add(ArtistId) : null;
+#           1) !AlreadyDoneArtists.Contains(ArtistId) ? ArtistsDict.add(ArtistId, ResourceUrl) : alreadyDoneArtsits.add(ArtistId); null;
 #           2) Add to ArtistTrackMap (ArtistId, TrackId); #on conflict ignore
 #       b) for each album...
 #           1) !AlreadyDoneAlbums.Contains(AlbumId) ? AlbumDict.add(AlbumId, ResourceUrl) : null
-#           2) Add to AlbumTrackMap(AlbumId, TrackId); # cn conflcit ignore
+#           2) Add to AlbumTrackMap(AlbumId, TrackId); # on conflcit ignore
 #       c) add to SavedSongs Table: (UserId, songid, addedat); # oci
 #       d) because SavedTracks are full track objects: #oci for all
 #           1) Add to Tracks Table: (TrackId, AvailableMarkets, disc_number, duration_ms, explicit, Href, is_playable, linked_from, restrictions, name, Popularity, preview_url, track_number, uri);
@@ -29,7 +103,7 @@
 #           5) Add to Images Table: (AlbumId, type: 'album', height, width, url); #type is see above
 #           6) Add to AlreadyDoneAlbums.Add(SavedAlbum.Album.AlbumId)
 #       b) For each Artist...
-#           1) !AlreadyDoneArtists.Contains(ArtistId) ? ArtistsDict.add(ArtistId, ResourceUrl);alreadyDoneArtsits.add(ArtistId) : null;
+#           1) !AlreadyDoneArtists.Contains(ArtistId) ? ArtistsDict.add(ArtistId, ResourceUrl) : alreadyDoneArtsits.add(ArtistId) : null;
 #           2) add to ArtistAlbumMap Table: (AlbumId, ArtistId);
 #       c) add to SavedAlbums Table: (UserId, AlbumId, addedat);
 
