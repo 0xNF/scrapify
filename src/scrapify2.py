@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 import json
 import re
+import math
 
 user = 'nishumvar'
 scopes = "playlist-read-private playlist-read-collaborative user-follow-read user-library-read \
@@ -16,9 +17,12 @@ sp = Spotify()
 dbname = "tpy.db"
 db = None
 
+CurrentUserMarket = 'US'
+
 conn = sqlite3.connect(dbname)
 
 ROrder = 1
+CurrentROrder = 1
 
 # List of Directories to create and write json data to.
 # Organized by Type. i.e.
@@ -62,9 +66,11 @@ StagedToAdd_Albums = []
 StagedToAdd_Artists = []
 StagedToAdd_SavedTracks = []
 StagedToAdd_Playlists = []
-StagedToAdd_PlaylistTracks = []
+StagedToAdd_PlaylistTracks = {} # Format of {PlaylistId: [ListOfTracks]}
 StagedToAdd_SavedAlbums = []
 StagedToAdd_Users = []
+StagedToAdd_AlbumTracks = {} # Format of {AlbumId: [ListOfTracks]}
+StagedToAdd_AlbumArtists = {} # FOrmat of {albumId: [ListOfArtistIds]}
 
 def PopulateAlreadySeenItems():
     CollectedArtists = populate("ArtistId", "Artists")
@@ -76,12 +82,10 @@ def PopulateAlreadySeenItems():
 
 def populate(pkey, table):
     c = conn.cursor()
-    q = "SELECT ? FROM {};".format(table)
-    vals = (pkey,)
-    c.execute(q, vals)
+    q = "SELECT {} FROM {};".format(pkey, table)
     ids = []
-    for res in c.fetchall():
-        ids.append(res)
+    for row in c.execute(q):
+        ids.append(row[0])
     c.close()
     print("Found {} {} already fully populated in".format(len(ids), table))
     return ids
@@ -236,57 +240,12 @@ def GetFullPlaylistTracks():
             break
         else:
             Cont = GetPlaylistsTracks(pl[0], pl[1])
-
-Artists_InsertedAsSimple = []
-def InsertArtist(artist):
-    q = "INSERT OR IGNORE INTO Artists \
-        (ArtistId, Genres, Href, Name, Popularity, Uri) \
-        VALUES (?, ?, ?, ?, ?, ?);"    
-    aid = artist["id"] 
-    genre = artist["genres"] if "genres" in artist else []    
-    href = artist["href"] if "href" in artist else ""
-    name = artist["name"] if "name" in artist else ""
-    pop = artist["popularity"] if "popularity" in artist else 0
-    uri = artist["uri"] if "uri" in artist else ""
-    values = (artist["id"], genre, href, name, pop, uri)
-    conn.execute(q, values)
-
-    # external urls
-    eu = artist["external_urls"]
-    if eu is not None:
-        q2 = "INSERT INTO External_Urls \
-            (ResourceId, Type, Key, Value) \
-            VALUES (?, ?, ?, ?);"
-        valArr = []
-        for key in eu.keys():
-            val = eu[key]
-            tup = (aid, artist["type"], key, val)
-            valArr.append(tup)
-        conn.executemany(q2, valArr)        
-        conn.commit()
-
-    # external ids
-    ei = artist["external_ids"]
-    if ei is not None:
-        q3 = "INSERT INTO External_Ids \
-            (ResourceId, Type, Key, Value) \
-            VALUES (?, ?, ?, ?);"
-        valArr2 = []
-        for key in ei.keys():
-            val = ei[key]
-            tup = (aid, artist["type"], key, val)
-            valArr.append(tup)
-        conn.executemany(q3, valArr2)        
-        conn.commit()            
-
-    Artists_InsertedAsSimple.append(aid)
-    return
     
 
 # The goal of any ParseToQueue function is to assemble either:
 # a) the full JObject of an item ready for inserting into the Database, or
 # b) IDs of related items that need to be queued and then parsed themselves.
-def ParseSavedSongsToQueue(fname):
+def ParseSavedSongsToQueue(fname, order):
     path = os.path.join(dirs["savedtracks"],fname)
     with open(path, 'r') as f:
         j = json.load(f)
@@ -319,7 +278,7 @@ def ParseSavedSongsToQueue(fname):
                         # this is a Simple Album. We need the Full Album.
     return
 
-def ParseSavedAlbumsToQueue(fname):
+def ParseSavedAlbumsToQueue(fname, order):
     path = os.path.join(dirs["savedalbums"],fname)
     with open(path, 'r') as f:
         j = json.load(f)
@@ -349,10 +308,38 @@ def ParseSavedAlbumsToQueue(fname):
                         trackid = track["id"]
                         if trackid not in CollectedTracks:
                             CollectedTracks.append(trackid)
-                        # TODO Some Mapping of Album : Song, because its a Full Track
+                        if albumid not in StagedToAdd_AlbumTracks:
+                            StagedToAdd_AlbumTracks[albumid] = [trackid]
+                        else:
+                            StagedToAdd_AlbumTracks[albumid].append(trackid)
+                addme = (added_at, albumid)
+                if albumid not in StagedToAdd_AlbumTracks:
+                    StagedToAdd_AlbumTracks[albumid] = [addme]
+                else:
+                    StagedToAdd_AlbumTracks[albumid].append(addme)
     return
 
-def ParsePlaylistTracksToQueue(fname):
+def ParsePlaylistToQueue(fname, playlistid, order):
+    if playlistid not in CollectedPlaylists and playlistid not in StagedToAdd_Playlists:
+        with open(fname, 'r') as f:
+            j = json.load(f)       
+            StagedToAdd_Playlists.append(j)
+            # collaborative = j["collaborative"]
+            # href = j["href"]
+            # name = j["name"]
+            # followers = j["followers"]
+            # description = j["description"]
+            # owner = j["owner"]
+            # snapshotid = j["snapshot_id"]
+            # images = j["images"]
+            # primary_color = j["primary_color"]
+            # uri = j["uri"]
+            # external_urls = j["external_urls"]
+            # public = j["public"]
+    return
+
+
+def ParsePlaylistTracksToQueue(fname, playlistid, order):
     with open(fname, 'r') as f:
         j = json.load(f)
         items = j["items"]
@@ -363,12 +350,17 @@ def ParsePlaylistTracksToQueue(fname):
                 userid = added_by["id"]
                 track = pto["track"]
                 trackid = track["id"]
-                if userid not in CollectedUsers and userid not in QueuedUsers:
-                    QueuedUsers.append(added_by)
+                if userid not in CollectedUsers:
+                    StagedToAdd_Users.append(added_by)
+                    CollectedUsers.append(userid)
                 if trackid not in CollectedTracks and trackid not in QueuedTracks:
-                    StagedToAdd_Tracks.append(track) #these are full trackd
+                    StagedToAdd_Tracks.append(track) #these are full tracks
                     CollectedTracks.append(trackid)
-                # TODO some mapping of Playlist : PlaylistTrack
+                addme = (added_at, userid, trackid)
+                if playlistid not in StagedToAdd_PlaylistTracks:
+                    StagedToAdd_PlaylistTracks[playlistid] = [addme]
+                else:
+                    StagedToAdd_PlaylistTracks[playlistid].append(addme)
     return
 
 
@@ -381,29 +373,66 @@ def AcquireInitialJson():
     return
 
 
-def RecurseParse(kind):
+def RecurseParseAll():
+    RecurseParse("SavedSongs", CurrentROrder)
+    RecurseParse("SavedAlbums", CurrentROrder)
+    RecurseParse("Playlists", CurrentROrder)
+    RecurseParse("PlaylistTracks", CurrentROrder)
+    print("Number of Staged Saved Tracks: {}".format(len(StagedToAdd_SavedTracks)))
+    print("Number of Staged Tracks: {}".format(len(StagedToAdd_Tracks)))
+    print("Number of Staged Users: {}".format(len(StagedToAdd_Users)))
+    print("Number of Staged Artists: {}".format(len(StagedToAdd_Artists)))
+    print("Number of Staged Albums: {}".format(len(StagedToAdd_Albums)))
+    print("Number of Staged Album Tracks: {}".format(len(StagedToAdd_AlbumTracks)))
+    print("Number of Staged Playlists: {}".format(len(StagedToAdd_Playlists)))
+    print("Number of Staged Playlist Tracks: {}".format(len(StagedToAdd_PlaylistTracks)))
+    print("Number of Staged Saved Albums: {}".format(len(StagedToAdd_SavedAlbums)))
+
+
+    print("Number of Queued Albums: {}".format(len(QueuedAlbums)))
+    print("Number of Queued Artists: {}".format(len(QueuedArists)))
+    print("Number of Staged Playlists: {}".format(len(StagedToAdd_Playlists)))
+    return
+
+def RecurseParse(kind, CurrentROrder):
     if kind == "SavedSongs":
         listOfSavedSongFiles = os.listdir(dirs["savedtracks"])
         listOfSavedSongFiles.sort(key=natural_sort_key)
         for j in listOfSavedSongFiles:
-            ParseSavedSongsToQueue(j)
+            ParseSavedSongsToQueue(j, CurrentROrder)
              # break #TODO get rid of this later. Only for testing
     elif kind == "SavedAlbums":
         listofSavedAlbumFiles = os.listdir(dirs["savedalbums"])
         listofSavedAlbumFiles.sort(key=natural_sort_key)
         for j in listofSavedAlbumFiles:
-            ParseSavedAlbumsToQueue(j)
+            ParseSavedAlbumsToQueue(j, CurrentROrder)
              # break #TODO get rid of this later. Only for testing
-        pass
+    elif kind == "Playlists":
+        listOfPlaylists = [x for x in os.listdir(dirs["playlists"]) if os.path.isdir(os.path.join(dirs["playlists"], x))]
+        for pl in listOfPlaylists:
+            p = os.path.join(dirs["playlists"], pl)
+            listOfDetails = [os.path.join(p,x) for x in os.listdir(p) if os.path.isfile(os.path.join(p, x))]
+            for detail in listOfDetails:
+                ParsePlaylistToQueue(detail, pl, CurrentROrder)
     elif kind == "PlaylistTracks":
         listOfPlaylists = os.listdir(dirs["playlists"])
-        for pl in listOfPlaylists:
+        listOfPlaylists = [x for x in listOfPlaylists if os.path.isdir(os.path.join(dirs["playlists"], x))]
+        for pl in listOfPlaylists:            
             listofPTOs = os.listdir(os.path.join(dirs["playlists"], pl, "tracks"))
             listofPTOs.sort(key=natural_sort_key)
             for ptopage in listofPTOs:
                 p = os.path.join(dirs["playlists"], pl, "tracks", ptopage)
-                ParsePlaylistTracksToQueue(p)
+                ParsePlaylistTracksToQueue(p, pl, CurrentROrder)
     return
+
+def ConstructCopyrightTuples(copyrights, albumid):
+    """Returns listOf(albumid, text, type)"""
+    insertvals = []
+    if copyrights and len(copyrights) > 0 :
+        for c in copyrights:
+            t = (albumid, c["text"], c["type"])
+            insertvals.append(t)
+    return insertvals
 
 def ConstructInsertExternalTuples(externalurls, resourceid, type):
     insertVals = []
@@ -427,86 +456,553 @@ def ConstructImageTuple(imgArray, resourceid, type):
             insertVals.append((resourceid, type, img["height"], img["width"], img["url"]))
     return insertVals
 
-# Can't insert Saved Tracks without a User present.
-def GetUser():
-    resourceType = "user"
-    user = sp.current_user()
+def InsertTrackRelinks(relinktuples):
+    resourceType = "track"
+    q = "INSERT OR IGNORE INTO TrackRelinks(TrackId, UnavailableMarket, AvailableTrackId) VALUES (?, ?, ?);"
     c = conn.cursor()
-    c.execute("SELECT * FROM Users WHERE UserId = ?", (user["id"],))
-    res = c.fetchone()
-    if res is None or len(res) == 0:
-        print ("No User entry in db for current user")
-        q = "INSERT INTO Users (UserId, DisplayName, Href, Uri, Birthdate, Country, Email, Product) \
+    c.executemany(q, relinktuples)
+    c.close()
+    conn.commit()
+    return
+
+def InsertSavedTracks(listOfSavedTracks):
+    q = "INSERT OR IGNORE INTO SavedTracks (UserId, TrackId, AddedAt, IsLocal) VALUES (?,?,?,?)"
+    tups = []
+    for saved in listOfSavedTracks:
+        uid = user
+        added_at = saved[1]
+        trackid = saved[0]
+        local = False
+        tup = (uid, trackid, added_at, local)
+        tups.append(tup)
+    c = conn.cursor()
+    c.executemany(q,tups)
+    c.close()
+    conn.commit()
+    print("Inserted {} saved tracks into db".format(len(listOfSavedTracks)))
+    return
+
+def InsertAlbumTracks(listOfAlbumTracks):
+    q = "INSERT OR IGNORE INTO AlbumTrackMap (AlbumId, TrackId) VALUES (?, ?);"
+    tups = []
+    for albumid in listOfAlbumTracks.keys():
+        trackids = listOfAlbumTracks[albumid]
+        for trackid in trackids:
+            m = (albumid, trackid)
+            tups.append(m)
+    c = conn.cursor()
+    c.executemany(q, tups)
+    c.close()
+    conn.commit()
+    print("Inserted {} album-track mappings into database".format(len(listOfAlbumTracks)))
+    return
+
+def InsertPlaylistTracks(listOfPlaylistTracks):
+    q = "INSERT OR IGNORE INTO PlaylistTracks(PlaylistId, TrackId, AddedAt, AddedBy) VALUES (?, ?, ?, ?);"
+    tups = []
+    for playlistid in listOfPlaylistTracks.keys():
+        lst = listOfPlaylistTracks[playlistid] # (added_at, userid, trackid)
+        for tracks in lst:
+            m = (playlistid, tracks[2], tracks[0], tracks[1])
+            tups.append(m)
+    c = conn.cursor()
+    c.executemany(q, tups)
+    c.close()
+    conn.commit()
+    print("Inserted {} playlist tracks into database".format(len(listOfPlaylistTracks)))
+    return
+
+def InsertArtistAlbums(listOfArtistAlbums):
+    q = "INSERT OR IGNORE INTO ArtistAlbumsMap (AlbumId, ArtistId) VALUES (?, ?);"
+    tups = []
+    for albumid in listOfArtistAlbums.keys():
+        artistids = listOfArtistAlbums[albumid]
+        for artistid in artistids:
+            m = (albumid, artistid)
+            tups.append(m)
+    c = conn.cursor()
+    c.executemany(q, tups)
+    c.close()
+    conn.commit()
+    print("Inserted {} artist-album mappings into database".format(len(listOfArtistAlbums)))
+    return
+
+def InsertTracks(listOfTracks):
+    resourceType = "track"
+    q = "INSERT OR IGNORE INTO Tracks (TrackId, AvailableMarkets, DiscNumber, DurationMs,\
+                                     Explicit, Href, IsPlayable, Restrictions, \
+                                     Name, Popularity, PreviewUrl, TrackNumber, Uri) \
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    trackTuples = []
+    relinkTuples = []
+    for track in listOfTracks:
+        trackid = track["id"]
+        markets = ','.join(track["available_markets"])
+        disc = track['disc_number'] if 'disc_number' in track else 1
+        duration = track['duration_ms'] if 'duration_ms' in track else 0
+        explicit = track['explicit'] if 'explicit' in track else False
+        href = track['href'] if 'href' in track else ''
+        playable = track['is_playable'] if 'is_playable' in track else True
+        linkedfrom = track['linked_from'] if 'linked_from' in track else None
+        restrictions = track['restrictions'] if 'restrictions' in track else None
+        name = track['name']
+        popularity = track['popularity'] if 'popularity' in track else None
+        prev = track['preview_url'] if 'preview_url' in track else None
+        tracknumber = track['track_number'] if 'track_number' in track else 1
+        uri = track['uri'] if 'uri' in track else 'spotify:track:{}'.format(trackid)
+
+        if linkedfrom is not None:
+            tup = (linkedfrom['id'], CurrentUserMarket, trackid)
+            relinkTuples.append(tup)
+        trackTuples.append((trackid, markets, disc, duration, explicit, href, playable, restrictions, name, popularity, prev, tracknumber, uri))
+    c = conn.cursor()
+    c.executemany(q, trackTuples)
+    conn.commit()
+    InsertTrackRelinks(relinkTuples)
+    print("inserted {} tracks to db".format(len(listOfTracks)))
+    return
+
+def InsertAlbums(listOfAlbums):
+    resourceType = "album"
+    albumTups = []
+    externalUrlTuples = []
+    externalIdTuples = []
+    imageTuples = []
+    copyrightTuples = []
+    q = "INSERT OR IGNORE INTO ALBUMS \
+                    (AlbumId, AlbumType, AvailableMarkets, Href, Label, Name, ReleaseDate, ReleaseDatePrecision, Restrictions, Uri, Popularity)\
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    for album in listOfAlbums:
+        aid = album["id"]
+        atype = album["album_type"] if "album_type" in album else "album"
+        markets = ",".join(album["available_markets"])
+        href = album["href"]
+        label = album["label"]
+        name = album["name"]
+        rdate = album["release_date"]
+        rdatep = album["release_date_precision"]
+        restrictions = album["restrictions"] if "restrictions" in album else None
+        uri = album["uri"]
+        ei = album["external_ids"] if "external_ids" in album else None
+        eu = album["external_urls"] if "external_urls" in album else None
+        images = album["images"] if "images" in album else None
+        copyrights = album["copyright"] if "copyright" in album else None
+        popularity = album["popularity"] if "popularity" in album else None
+
+        # Album
+        atup = (aid, atype, markets, href, label, name, rdate, rdatep, restrictions, uri, popularity)
+        albumTups.append(atup)
+
+        # External Urls
+        urlTuples = ConstructInsertExternalTuples(eu, aid, resourceType)
+        externalUrlTuples.extend(urlTuples)    
+
+        # External Ids
+        idTuples = ConstructInsertExternalTuples(ei, aid, resourceType)
+        externalIdTuples.extend(idTuples)
+
+        # Images
+        imageTuple = ConstructImageTuple(images, aid, resourceType)
+        imageTuples.extend(imageTuple)      
+
+        # Copyrights
+        copyrightTuple = ConstructCopyrightTuples(copyrights, aid)
+        copyrightTuples.extend(copyrightTuple)
+
+
+    c = conn.cursor()
+    c.executemany(q, albumTups)  
+
+    # External Urls
+    if externalUrlTuples is not None and len(externalUrlTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Urls (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalUrlTuples)
+
+    # External Ids
+    if externalIdTuples is not None and len(externalIdTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Ids (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalIdTuples) 
+
+    # Images
+    if imageTuples is not None and len(imageTuples) > 0:
+        q4 = "INSERT OR IGNORE INTO Images (ResourceId, Type, Height, Width, Url) \
+            VALUES (?, ?, ?, ?, ?);"
+        c.executemany(q4, imageTuples)  
+
+    # Copyrights
+    if copyrightTuples is not None and len(copyrightTuples) > 0:
+        q5 = "INSERT OR IGNORE INTO Copyrights (AlbumId, Text, Type) VALUES (?, ?, ?);"
+        c.executemany(q5, copyrightTuples)
+
+    c.close()
+    conn.commit()
+    print("Inserted {} albums into db".format(len(listOfAlbums)))
+    return
+
+def InsertSavedAlbums(listOfSavedAlbums):
+    q = "INSERT OR IGNORE INTO SavedAlbums (UserId, AlbumId, AddedAt) VALUES (?,?,?)"
+    tups = []
+    for saved in listOfSavedAlbums:
+        uid = user
+        added_at = saved[1]
+        albumid = saved[0]
+        tup = (uid, albumid, added_at)
+        tups.append(tup)
+    c = conn.cursor()
+    c.executemany(q,tups)
+    conn.commit()
+    print("Inserted {} saved albums into db".format(len(listOfSavedAlbums)))
+    return
+
+def InsertArtists(listOfArtists):
+    resourceType = "artist"
+    artistTups = []
+    externalUrlTuples = []
+    externalIdTuples = []
+    followerTuples = []
+    imageTuples = []
+    q = "INSERT OR IGNORE INTO Artists \
+        (ArtistId, Genres, Href, Name, Popularity, Uri) \
+        VALUES (?, ?, ?, ?, ?, ?);"    
+    for artist in listOfArtists:
+        aid = artist["id"] 
+        genre = artist["genres"] if "genres" in artist else []    
+        href = artist["href"] if "href" in artist else ""
+        name = artist["name"] if "name" in artist else ""
+        pop = artist["popularity"] if "popularity" in artist else 0
+        uri = artist["uri"] if "uri" in artist else ""
+        eu = artist["external_urls"] if "external_urls" in artist else None
+        ei = artist["external_ids"] if "external_ids" in artist else None
+        images = artist["images"] if "images" in artist else None
+        followers = artist["followers"] if "followers" in artist else None
+
+        # Artist
+        artistTup = (artist["id"], genre, href, name, pop, uri)
+        artistTups.append(artistTup)
+
+        # External Urls
+        urlTuples = ConstructInsertExternalTuples(eu, aid, resourceType)
+        externalUrlTuples.extend(urlTuples)    
+
+        # External Ids
+        idTuples = ConstructInsertExternalTuples(ei, aid, resourceType)
+        externalIdTuples.extend(idTuples)
+
+        # Followers
+        followTuple = ConstructFollowerTuples(followers, aid, resourceType)
+        followerTuples.extend(followTuple)
+
+        # Images
+        imageTuple = ConstructImageTuple(images, aid, resourceType)
+        imageTuples.extend(imageTuple)      
+
+    c = conn.cursor()
+    c.executemany(q, artistTups)  
+
+        # External Urls
+    if externalUrlTuples is not None and len(externalUrlTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Urls (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalUrlTuples)
+
+    # External Ids
+    if externalIdTuples is not None and len(externalIdTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Ids (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalIdTuples)
+
+    # Followers
+    if followerTuples is not None and len(followerTuples) > 0:
+        q3 = "INSERT OR IGNORE INTO Followers (ResourceId, Type, Href, Total) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q3, followerTuples)     
+
+    # Images
+    if imageTuples is not None and len(imageTuples) > 0:
+        q4 = "INSERT OR IGNORE INTO Images (ResourceId, Type, Height, Width, Url) \
+            VALUES (?, ?, ?, ?, ?);"
+        c.executemany(q4, imageTuples)  
+    c.close()
+    conn.commit()
+    print("Inserted {} artists into db".format(len(listOfArtists)))
+    return
+
+def InsertPlaylists(listOfPlaylists):
+    resourceType = "playlist"
+    q = "INSERT OR IGNORE INTO Playlists (PlaylistId, Collaborative, Href, Name, Public, SnapshotId, Uri, OwnerId, Description) \
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    playlistTups = []
+    externalUrlTuples = []
+    externalIdTuples = []
+    followerTuples = []
+    imageTuples = []
+    for playlist in listOfPlaylists:
+        pid = playlist["id"]
+        eu = playlist["external_urls"] if "external_urls" in playlist else None
+        ei = playlist["external_ids"] if "external_ids" in playlist else None
+        followers = playlist["followers"] if "followers" in playlist else None
+        images = playlist["images"] if "images" in playlist else None
+        collab = playlist["collaborative"] if "collaborative" in playlist else False
+        href = playlist["href"]
+        name = playlist["name"]
+        description = playlist["description"]
+        owner = playlist["owner"]["id"]      
+        public = playlist["public"] if "public" in playlist else True
+        snapshot = playlist["snapshot_id"]
+        uri = playlist["uri"]
+
+        # Playlist Insert
+        ptup = (pid, collab, href, name, public, snapshot, uri, owner, description)
+        playlistTups.append(ptup)
+
+        # External Urls
+        urlTuples = ConstructInsertExternalTuples(eu, pid, resourceType)
+        externalUrlTuples.extend(urlTuples)    
+
+        # External Ids
+        idTuples = ConstructInsertExternalTuples(ei, pid, resourceType)
+        externalIdTuples.extend(idTuples)
+
+        # Followers
+        followTuple = ConstructFollowerTuples(followers, pid, resourceType)
+        followerTuples.extend(followTuple)
+
+        # Images
+        imageTuple = ConstructImageTuple(images, pid, resourceType)
+        imageTuples.extend(imageTuple)  
+
+    c = conn.cursor()
+    c.executemany(q, playlistTups)
+
+    # External Urls
+    if externalUrlTuples is not None and len(externalUrlTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Urls (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalUrlTuples)
+
+    # External Ids
+    if externalIdTuples is not None and len(externalIdTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Ids (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalIdTuples)
+
+    # Followers
+    if followerTuples is not None and len(followerTuples) > 0:
+        q3 = "INSERT OR IGNORE INTO Followers (ResourceId, Type, Href, Total) \
+                VALUES (?, ?, ?, ?);"
+        print(followerTuples)
+        c.executemany(q3, followerTuples)     
+
+    # Images
+    if imageTuples is not None and len(imageTuples) > 0:
+        q4 = "INSERT OR IGNORE INTO Images (ResourceId, Type, Height, Width, Url) \
+            VALUES (?, ?, ?, ?, ?);"
+        c.executemany(q4, imageTuples)  
+
+    print("Inserted {} users into database".format(len(playlistTups)))
+    c.close()
+    conn.commit()
+    return    
+
+def InsertUsers(listOfUsers):
+    resourceType = "user"
+    c = conn.cursor()
+    q = "INSERT OR IGNORE INTO Users (UserId, DisplayName, Href, Uri, Birthdate, Country, Email, Product) \
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    usersToInsert = []
+    externalUrlTuples = []
+    externalIdTuples = []
+    followerTuples = []
+    imageTuples = []
+    for user in listOfUsers:
         uid = user["id"]
         uri = user["uri"] if "uri" in user else "spotify:user:{}".format(uid)
         birthdate = user["birthdate"] if "birthdate" in user else None
         email = user["email"] if "email" in user else None
         href = user["href"] if "href" in user else "https://api.spotify.com/v1/users/{}".format(uid)
-        followers = user["followers"] if "followers" in user else []
+        followers = user["followers"] if "followers" in user else None
         displayname = user["display_name"] if "display_name" in user else None
         country = user["country"] if "country" in user else None
         product = user["product"] if "product" in user else None
         eu = user["external_urls"] if "external_urls" in user else None
         ei = user["external_ids"] if "external_ids" in user else None
         images = user["images"] if "images" in user else None
-
         # User Insert
         userinsertvals = (uid, displayname, href, uri, birthdate, country, email, product)
-        c.execute(q, userinsertvals)
+        usersToInsert.append(userinsertvals)
 
         # External Urls
         urlTuples = ConstructInsertExternalTuples(eu, uid, resourceType)
-        if urlTuples is not None and len(urlTuples) > 0:
-            q2 = "INSERT INTO External_Urls (ResourceId, Type, Key, Value) \
-                    VALUES (?, ?, ?, ?);"
-            c.executemany(q2, urlTuples)
-        
+        externalUrlTuples.extend(urlTuples)    
+
         # External Ids
         idTuples = ConstructInsertExternalTuples(ei, uid, resourceType)
-        if idTuples is not None and len(idTuples) > 0:
-            q2 = "INSERT INTO External_Ids (ResourceId, Type, Key, Value) \
-                    VALUES (?, ?, ?, ?);"
-            c.executemany(q2, urlTuples)
+        externalIdTuples.extend(idTuples)
 
         # Followers
         followTuple = ConstructFollowerTuples(followers, uid, resourceType)
-        if followTuple is not None and len(followTuple) > 0:
-            q3 = "INSERT INTO Followers (ResourceId, Type, Href, Total) \
-                   VALUES (?, ?, ?, ?);"
-            c.executemany(q3, followTuple)     
+        followerTuples.extend(followTuple)
 
         # Images
         imageTuple = ConstructImageTuple(images, uid, resourceType)
-        if imageTuple is not None and len(imageTuple) > 0:
-            q4 = "INSERT INTO Images (ResourceId, Type, Height, Width, Url) \
-                VALUES (?, ?, ?, ?, ?);"
-            c.executemany(q4, imageTuple)  
+        imageTuples.extend(imageTuple)        
 
-        conn.commit()
+    c.executemany(q, usersToInsert)
+    print("Inserted {} users into database".format(len(usersToInsert)))
+
+    # External Urls
+    if externalUrlTuples is not None and len(externalUrlTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Urls (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalUrlTuples)
+
+    # External Ids
+    if externalIdTuples is not None and len(externalIdTuples) > 0:
+        q2 = "INSERT OR IGNORE INTO External_Ids (ResourceId, Type, Key, Value) \
+                VALUES (?, ?, ?, ?);"
+        c.executemany(q2, externalIdTuples)
+
+    # Followers
+    if followerTuples is not None and len(followerTuples) > 0:
+        q3 = "INSERT OR IGNORE INTO Followers (ResourceId, Type, Href, Total) \
+                VALUES (?, ?, ?, ?);"
+        print(followerTuples)
+        c.executemany(q3, followerTuples)     
+
+    # Images
+    if imageTuples is not None and len(imageTuples) > 0:
+        q4 = "INSERT OR IGNORE INTO Images (ResourceId, Type, Height, Width, Url) \
+            VALUES (?, ?, ?, ?, ?);"
+        c.executemany(q4, imageTuples)  
+
+    c.close()
+    conn.commit()
+    return
+
+def InsertStagedUsers():
+    InsertUsers(StagedToAdd_Users)
+    StagedToAdd_Users.clear()
+    return
+
+def InsertStagedTracks():
+    InsertTracks(StagedToAdd_Tracks)
+    StagedToAdd_Tracks.clear()
+
+def InsertStagedSavedTracks():
+    InsertSavedTracks(StagedToAdd_SavedTracks)
+    StagedToAdd_SavedTracks.clear()
+
+def InsertStagedArtists():
+    InsertArtists(StagedToAdd_Artists)
+    StagedToAdd_Artists.clear()
+
+def InsertStagedAlbums():
+    InsertAlbums(StagedToAdd_Albums)
+    StagedToAdd_Albums.clear()
+
+def InsertStagedSavedAlbums():
+    InsertSavedAlbums(StagedToAdd_SavedAlbums)
+    StagedToAdd_SavedAlbums.clear()
+
+def InsertStagedAlbumTracks():
+    InsertAlbumTracks(StagedToAdd_AlbumTracks)
+    StagedToAdd_AlbumTracks.clear()
+
+def InsertStagedPlaylists():
+    InsertPlaylists(StagedToAdd_Playlists)
+    StagedToAdd_Playlists.clear()
+
+def InsertStagedPlaylistTracks():
+    InsertPlaylistTracks(StagedToAdd_PlaylistTracks)
+    StagedToAdd_PlaylistTracks.clear()
+
+def InsertStagedArtistAlbums():
+    InsertArtistAlbums(StagedToAdd_AlbumArtists)
+    StagedToAdd_AlbumArtists.clear()
+
+def InsertStagedAll():
+    InsertStagedUsers()
+    InsertStagedTracks()
+    InsertStagedSavedTracks()
+    InsertStagedArtists()
+    InsertStagedAlbums()
+    InsertStagedSavedAlbums()
+    InsertStagedAlbumTracks()
+    InsertStagedArtistAlbums()
+    InsertStagedPlaylists()
+    InsertStagedPlaylistTracks()
+    return
+
+# Can't insert Saved Tracks or Playlists without a User present.
+def GetUser():
+    global CurrentUserMarket
+    user = sp.current_user()
+    CurrentUserMarket = user['country'] if 'country' in user else 'US'
+    c = conn.cursor()
+    c.execute("SELECT * FROM Users WHERE UserId = ?", (user["id"],))
+    res = c.fetchone()
+    if res is None or len(res) == 0:
+        print ("No User entry in db for current user")
+        InsertUsers([user])
     else:
         print ("Current user already existed in database.")
     return
 
+def Dq(queued,collected, spotipicall, lim=50):
+    ReadyToGo = []    
+    for id in queued:
+        if id not in collected:
+            ReadyToGo.append(id)
+    for id in ReadyToGo:
+        queued.remove(id)
+    batches = [ [ReadyToGo[(x*lim)+y] for y in range(min(lim,len(ReadyToGo)-(x*lim)))]  for x in range(math.ceil(len(ReadyToGo)/lim))]
+
+
+def DqArtists():
+    global sp
+    sp.
+    Dq(QueuedArists, CollectedArtists)
+    return
+    
+
+
+
+# Flow:
+#   0) Create DB if not exist
+#   1) Refresh/Acquire Tokens
+#   2) Setup Scrape Dirs
+#   3) Get the Current User + save to DB
+#   4) Acquire initial JSON files
+#   5) Populate RAM with ids of already collected items
+#   6) RecuerseParse Saved Songs
+#   7) RecurseParse SavedAlbums
+#   8) RecurseParse PlaylistTracks 
+#   ...
+#   8a) if currentROrder > ROrder, stop. # not true for first run.
+#   8b) for d in dirs: RecurseParse(d)
+#   8c) For queuedItem in QueuedItems: DL(QueuedItem)
+#   9) Write Staged items to Database
+#   ....
+#   9a) if currentROrder > ROrder, stop.
+#   10) For queuedItem in QueuedItems: DL(queuedItem)
+#   11) for d in dirs: RecurseParse(d)
+#   12) Write Staged Items to Database.
+
 
 def main():
+    global CurrentROrder
     RefreshSpotifyTokens()
     ScrapeSetup()
     GetUser()
     #AcquireInitialJson()
     PopulateAlreadySeenItems()
-    RecurseParse("SavedSongs")
-    RecurseParse("SavedAlbums")
-    RecurseParse("PlaylistTracks")
-    print("Number of Queued Saved Tracks: {}".format(len(QueuedSavedTracks)))
-    print("Number of Queued Albums: {}".format(len(QueuedAlbums)))
-    print("Number of Queued Artists: {}".format(len(QueuedArists)))
+    RecurseParseAll()
+    InsertStagedAll()
+    CurrentROrder += 1
 
     return
 
 if __name__ == '__main__':
     main()
-
-
-
-# Scrape Saved Songs
