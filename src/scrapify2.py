@@ -1,12 +1,13 @@
 #!/usr/bin/python3
-from spotipy import Spotify, util, client, oauth2
-import sqlite3
+import json
+import math
 import os
+import re
+import sqlite3
 import sys
 from pathlib import Path
-import json
-import re
-import math
+
+from spotipy import Spotify, client, oauth2, util
 
 user = 'nishumvar'
 scopes = "playlist-read-private playlist-read-collaborative user-follow-read user-library-read \
@@ -73,11 +74,14 @@ StagedToAdd_AlbumTracks = {} # Format of {AlbumId: [ListOfTracks]}
 StagedToAdd_AlbumArtists = {} # FOrmat of {albumId: [ListOfArtistIds]}
 
 def PopulateAlreadySeenItems():
-    CollectedArtists = populate("ArtistId", "Artists")
-    CollectedAlbums = populate("AlbumId", "Albums")
-    CollectedPlaylists = populate("PlaylistId", "Playlists")
-    CollectedTracks = populate("TrackId", "Tracks")
-    CollectedUsers = populate("UserId", "Users")
+    CollectedArtists.extend(populate("ArtistId", "Artists"))
+    CollectedAlbums.extend(populate("AlbumId", "Albums"))
+    CollectedPlaylists.extend(populate("PlaylistId", "Playlists"))
+    CollectedTracks.extend(populate("TrackId", "Tracks"))
+    CollectedUsers.extend(populate("UserId", "Users"))
+    # TODO read Artists/Albums/Tracks dir, parse ids and add to Collected
+    # this will prevent duplicate runs from queuing up the same ids that are already
+    # downloaded and awaiting parsing
     return
 
 def populate(pkey, table):
@@ -312,11 +316,11 @@ def ParseSavedAlbumsToQueue(fname, order):
                             StagedToAdd_AlbumTracks[albumid] = [trackid]
                         else:
                             StagedToAdd_AlbumTracks[albumid].append(trackid)
-                addme = (added_at, albumid)
-                if albumid not in StagedToAdd_AlbumTracks:
-                    StagedToAdd_AlbumTracks[albumid] = [addme]
-                else:
-                    StagedToAdd_AlbumTracks[albumid].append(addme)
+                # addme = (albumid, added_at)
+                # if addme not in StagedToAdd_SavedAlbums:
+                #     StagedToAdd_SavedAlbums[albumid] = [addme]
+                # else:
+                #     StagedToAdd_SavedAlbums[albumid].append(addme)
     return
 
 def ParsePlaylistToQueue(fname, playlistid, order):
@@ -571,7 +575,7 @@ def InsertAlbums(listOfAlbums):
     copyrightTuples = []
     q = "INSERT OR IGNORE INTO ALBUMS \
                     (AlbumId, AlbumType, AvailableMarkets, Href, Label, Name, ReleaseDate, ReleaseDatePrecision, Restrictions, Uri, Popularity)\
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
     for album in listOfAlbums:
         aid = album["id"]
         atype = album["album_type"] if "album_type" in album else "album"
@@ -792,7 +796,6 @@ def InsertPlaylists(listOfPlaylists):
     if followerTuples is not None and len(followerTuples) > 0:
         q3 = "INSERT OR IGNORE INTO Followers (ResourceId, Type, Href, Total) \
                 VALUES (?, ?, ?, ?);"
-        print(followerTuples)
         c.executemany(q3, followerTuples)     
 
     # Images
@@ -801,7 +804,7 @@ def InsertPlaylists(listOfPlaylists):
             VALUES (?, ?, ?, ?, ?);"
         c.executemany(q4, imageTuples)  
 
-    print("Inserted {} users into database".format(len(playlistTups)))
+    print("Inserted {} playlists into database".format(len(playlistTups)))
     c.close()
     conn.commit()
     return    
@@ -868,7 +871,6 @@ def InsertUsers(listOfUsers):
     if followerTuples is not None and len(followerTuples) > 0:
         q3 = "INSERT OR IGNORE INTO Followers (ResourceId, Type, Href, Total) \
                 VALUES (?, ?, ?, ?);"
-        print(followerTuples)
         c.executemany(q3, followerTuples)     
 
     # Images
@@ -950,20 +952,32 @@ def GetUser():
         print ("Current user already existed in database.")
     return
 
-def Dq(queued,collected, spotipicall, lim=50):
+def Dq(queued,collected, spcall, keyword, lim=50):
     ReadyToGo = []    
     for id in queued:
         if id not in collected:
             ReadyToGo.append(id)
     for id in ReadyToGo:
         queued.remove(id)
-    batches = [ [ReadyToGo[(x*lim)+y] for y in range(min(lim,len(ReadyToGo)-(x*lim)))]  for x in range(math.ceil(len(ReadyToGo)/lim))]
-
+    batches = [
+         [
+             ReadyToGo[(x*lim)+y]
+             for y in
+             range(min(lim,len(ReadyToGo)-(x*lim)))
+         ] 
+         for x in 
+         range(math.ceil(len(ReadyToGo)/lim))
+    ]
+    print("{} batches in queue".format(len(batches)))
+    startAt = len(os.listdir(dirs[keyword])) # for when it rate limits us.
+    for i,batch in enumerate(batches[startAt:]):
+        print("fetching batch {}".format(startAt+i))
+        res = spcall(batch)
+        SaveJson(dirs[keyword], "{}_{}.json".format(keyword, startAt+i), res)
+    return
 
 def DqArtists():
-    global sp
-    sp.
-    Dq(QueuedArists, CollectedArtists)
+    Dq(QueuedArists, CollectedArtists, sp.artists, 'artists')
     return
     
 
@@ -1000,6 +1014,7 @@ def main():
     PopulateAlreadySeenItems()
     RecurseParseAll()
     InsertStagedAll()
+    DqArtists()
     CurrentROrder += 1
 
     return
