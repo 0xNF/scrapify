@@ -33,9 +33,9 @@ CREATE TABLE IF NOT EXISTS `TrackRelinks` (
 	`TrackId`	TEXT NOT NULL,
 	`UnavailableMarket`	TEXT NOT NULL,
 	`AvailableTrackId`	INTEGER NOT NULL,
-	FOREIGN KEY(`AvailableTrackId`) REFERENCES `Tracks`(`TrackId`),
+	FOREIGN KEY(`AvailableTrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE,
 	PRIMARY KEY(`TrackId`,`UnavailableMarket`,`AvailableTrackId`),
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE
 );
 DROP TABLE IF EXISTS `SavedTracks`;
 CREATE TABLE IF NOT EXISTS `SavedTracks` (
@@ -43,9 +43,9 @@ CREATE TABLE IF NOT EXISTS `SavedTracks` (
 	`TrackId`	TEXT NOT NULL,
 	`AddedAt`	DATETIME,
 	`IsLocal`	INTEGER NOT NULL,
-	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`),
+	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`) ON DELETE CASCADE,
 	PRIMARY KEY(`UserId`,`TrackId`),
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE
 );
 DROP TABLE IF EXISTS `SavedArtists`;
 CREATE TABLE IF NOT EXISTS `SavedArtists` (
