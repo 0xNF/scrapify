@@ -1,4 +1,26 @@
 #!/usr/bin/python3
+
+# TODO:
+#   1) Categories
+#       a) Available Genre Seeds
+#           1) Collect from DB
+#           2) Insert to DB
+#       b) List Categories
+#           1) Collect from DB
+#           2) Insert to DB
+#       c) Category Playlists
+#           1) Collect from DB
+#           2) Insert to DB
+#       d) Featured Playlists
+#           1) Collect
+#           2) Queue Tracks
+#           3) Insert
+#       e) New Releases
+#   2) User Followed Artists
+#       a) Collect from DB
+#       b) Queue to Artists
+#       c) Insert to UserFollowedArtists
+
 import json
 import math
 import os
@@ -18,6 +40,7 @@ sp = Spotify()
 dbname = "tpy.db"
 schemafile = "schemaonly.sql"
 db = None
+obfuscate = False
 
 CurrentUserMarket = 'US'
 conn = None #initialized in Setup Database
@@ -43,6 +66,7 @@ CollectedSavedAlbums = []
 CollectedUsers = []
 CollectedAudioFeatures = []
 CollectedAudioAnalyses = []
+CollectedFollowed = {}
 
 # Queued resource ids to fetch Full versions of, and then append to StagedToAdd
 QueuedArists = []
@@ -70,6 +94,7 @@ StagedToAdd_AlbumTracks = {} # Format of {AlbumId: [ListOfTracks]}
 StagedToAdd_AlbumArtists = {} # Frmat of {albumId: [ListOfArtistIds]}
 StagedToAdd_AudioFeatures = [] 
 StagedToAdd_AudioAnalyses = []
+StagedToAdd_Followed = {} # Format of {UserId: [FollowedItem]}
 
 # def PopulateExtendNoDups(lst, extended):
 #     appender = []
@@ -100,6 +125,8 @@ def PopulateAlreadySeenItems():
 
     CollectedAudioAnalyses.extend(populate("TrackId", "AudioAnalyses"))
     CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audio_analyses"))
+
+
 
     for trackid in CollectedTracks:
         if trackid not in CollectedAudioFeatures:
@@ -144,6 +171,7 @@ def ScrapeSetup():
     dirSetup(dirs['raw'], 'toptracks_longterm')
     dirSetup(dirs['raw'], 'audio_analyses')
     dirSetup(dirs['raw'], 'audio_features')
+    dirSetup(dirs['raw'], 'follows')
     return
 
 def SetupDatabase():
@@ -299,6 +327,26 @@ def GetFullPlaylistTracks():
         else:
             Cont = GetPlaylistsTracks(pl[0], pl[1])
     
+def GetUserFollows():
+    p = os.path.join(dirs['follows'], user)
+    if not os.path.exists(p):
+        os.makedirs(p)
+    Cont = True
+    after = None
+    lim = 50
+    while(Cont):
+        page = sp.current_user_followed_artists(limit=lim, after=None)
+        print("Tried to fetch {2} after {0}, limit {1}".format(after, lim, "user followed artists"))
+        if not page:
+            print("Failed to retrieve page")
+            return False
+        else:
+            print("Retrieved page, saving to disk")
+            didSave = SaveJson(p, "{2}_followsartists_{0}_{1}.json".format(lim, after, user), page)
+            Cont = page['next'] and didSave
+            after = page["items"][-1]["id"]
+    print("Fetched All User {}'s Follows Artists".format(user))
+    return
 
 # The goal of any ParseToQueue function is to assemble either:
 # a) the full JObject of an item ready for inserting into the Database, or
@@ -480,6 +528,22 @@ def ParsePlaylistTracksToQueue(fname, playlistid, order):
                     StagedToAdd_PlaylistTracks[playlistid].append(addme)
     return
 
+def ParseFollowedArtistsToQueue(fname, userid):
+    counter = 0
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        if "artists" in j:
+            for artist in j["artists"]["items"]:
+                aid = artist["id"]
+                if aid not in CollectedArtists and aid not in QueuedArists:
+                    QueuedArists.append(aid)
+                    counter += 1
+                # TODO finish
+                # if aid not in StagedToAdd_Followed and (userid not in CollectedFollowed or  aid not in CollectedFollowed[userid]):
+                #     if Stagedt
+
+    print("Added another {} artists to the artist queue".format(counter))
+    return
 
 def AcquireInitialJson():
     needsAny = False
@@ -498,7 +562,11 @@ def AcquireInitialJson():
         GetAllPage(sp.current_user_playlists, "Saved Playlists", "playlists")
         GetFullPlaylists()
         GetFullPlaylistTracks()
-    
+    if len(os.listdir(dirs['follows'])) == 0:
+        needsAny = True
+        print("Nothing in Follows, acquiring...")
+        GetUserFollows()
+
     if not needsAny:
         print("Initial JSON was already acquired. Skipping to next step.")
     return
@@ -518,6 +586,7 @@ def RecurseParseAll():
     RecurseParse("Artists", CurrentROrder)
     RecurseParse("Albums", CurrentROrder)
     RecurseParse("AudioFeatures",CurrentROrder)
+    RecurseParse("Follows", CurrentROrder)
     print("Number of Staged Saved Tracks: {}".format(len(StagedToAdd_SavedTracks)))
     print("Number of Staged Tracks: {}".format(len(StagedToAdd_Tracks)))
     print("Number of Staged Users: {}".format(len(StagedToAdd_Users)))
@@ -610,6 +679,15 @@ def RecurseParse(kind, CurrentROrder):
         for fjson in listOfFeatureFiles:
             fname = os.path.join(dirs[resourceType], fjson)
             ParseAudioFeaturesToStaging(fname)
+    elif kind == "Follows":
+        resourceType = "artists"
+        listOfUsers = os.listdir(dirs["follows"])
+        for u in listOfUsers:
+            listofUserFollowedArtists = os.listdir(dirs["follows"], u)
+            for fjson in listofUserFollowedArtists:
+                p = os.path.join(dirs["follows"], u, fjson)
+                ParseFollowedArtistsToQueue(fjson, user)
+
     return
 
 def ConstructCopyrightTuples(copyrights, albumid):
@@ -715,7 +793,6 @@ def InsertArtistAlbums(listOfArtistAlbums):
     return
 
 def InsertTracks(listOfTracks):
-    resourceType = "track"
     q = "INSERT OR IGNORE INTO Tracks (TrackId, AvailableMarkets, DiscNumber, DurationMs,\
                                      Explicit, Href, IsPlayable, Restrictions, \
                                      Name, Popularity, PreviewUrl, TrackNumber, Uri) \
