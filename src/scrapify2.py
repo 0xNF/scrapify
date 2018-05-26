@@ -16,11 +16,11 @@ user-read-currently-playing user-read-recently-played"
 ccm = None
 sp = Spotify()
 dbname = "tpy.db"
+schemafile = "schemaonly.sql"
 db = None
 
 CurrentUserMarket = 'US'
-
-conn = sqlite3.connect(dbname)
+conn = None #initialized in Setup Database
 
 ROrder = 1
 CurrentROrder = 1
@@ -70,7 +70,13 @@ StagedToAdd_AlbumTracks = {} # Format of {AlbumId: [ListOfTracks]}
 StagedToAdd_AlbumArtists = {} # Frmat of {albumId: [ListOfArtistIds]}
 StagedToAdd_AudioFeatures = [] 
 StagedToAdd_AudioAnalyses = []
-StagedToAdd_Copyrights = {} # Format of {albumId: [ListOfCopyrights]}
+
+# def PopulateExtendNoDups(lst, extended):
+#     appender = []
+#     for thing in extended:
+#         if thing not in lst:
+#             appender.append(thing)
+#     lst.append(appender)
 
 def PopulateAlreadySeenItems():
     CollectedArtists.extend(populate("ArtistId", "Artists"))
@@ -90,10 +96,16 @@ def PopulateAlreadySeenItems():
     CollectedPlaylists.extend(populate("PlaylistId", "Playlists"))
 
     CollectedAudioFeatures.extend(populate("TrackId", "AudioFeatures"))
-    CollectedAudioFeatures.extend(ParseJsonsToCollectedId("audiofeatures"))
+    CollectedAudioFeatures.extend(ParseJsonsToCollectedId("audio_features"))
 
     CollectedAudioAnalyses.extend(populate("TrackId", "AudioAnalyses"))
-    CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audioanalyses"))
+    CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audio_analyses"))
+
+    for trackid in CollectedTracks:
+        if trackid not in CollectedAudioFeatures:
+            QueuedAudioFeatures.append(trackid)
+        if trackid not in CollectedAudioAnalyses:
+            QueuedAudioAnalyses.append(trackid)
 
     return
 
@@ -115,6 +127,7 @@ def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
             for text in re.split(_nsre, s)] 
 
 def ScrapeSetup():
+    SetupDatabase()
     dirSetup(os.getcwd(), 'raw')
     dirSetup(dirs['raw'], 'savedtracks')
     dirSetup(dirs['raw'], 'savedalbums')
@@ -129,8 +142,31 @@ def ScrapeSetup():
     dirSetup(dirs['raw'], 'toptracks_shortterm')
     dirSetup(dirs['raw'], 'toptracks_mediumterm')
     dirSetup(dirs['raw'], 'toptracks_longterm')
-    dirSetup(dirs['raw'], 'audioanalyses')
-    dirSetup(dirs['raw'], 'audiofeatures')
+    dirSetup(dirs['raw'], 'audio_analyses')
+    dirSetup(dirs['raw'], 'audio_features')
+    return
+
+def SetupDatabase():
+    global conn
+    dbpath = os.path.join(os.getcwd(), dbname)
+    schemapath = os.path.join(os.getcwd(), schemafile)
+    if os.path.exists(dbpath):
+        print("Database already existed.")
+        conn = sqlite3.connect(dbpath)
+        return
+    elif not os.path.exists(schemapath):
+        print("Database didn't exist but couldn't find Schemafile to create it. Please ensure {} is in the same directory as this script and run it again.".format(schemafile))
+        exit()
+    else:
+        conn = sqlite3.connect(dbpath)
+        s = ""
+        with open(schemapath, 'r') as f:
+            s = f.read()
+            conn.executescript(s)
+        conn.commit()
+        print("Created sqlite database")
+        exit()
+    return
 
 def dirSetup(p, s):
     dirs[s] = os.path.join(p, s)
@@ -360,7 +396,6 @@ def ParsePlaylistToQueue(fname, playlistid, order):
             # public = j["public"]
     return
 
-
 def ParseArtistsToStaging(fname):
     with open(fname, 'r') as f:
         j = json.load(f)
@@ -405,6 +440,22 @@ def ParseAlbumsToStaging(fname):
                 
     return
 
+def ParseAudioFeaturesToStaging(fname):
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        # The docs specify that the array is keyed behind 'audio_features', but an actual
+        # download shows just a raw arrau
+        arr = j["audio_features"] if "audio_features" in j else j 
+        for audio in arr:
+            trackid = audio["id"]
+            if trackid not in CollectedAudioAnalyses and audio not in StagedToAdd_AudioFeatures:
+                StagedToAdd_AudioFeatures.append(audio)
+        return
+
+def ParseAudioAnalysesToStaging(fname):
+    # TODO FIll me in
+    return
+
 def ParsePlaylistTracksToQueue(fname, playlistid, order):
     with open(fname, 'r') as f:
         j = json.load(f)
@@ -431,11 +482,25 @@ def ParsePlaylistTracksToQueue(fname, playlistid, order):
 
 
 def AcquireInitialJson():
-    GetAllPage(sp.current_user_saved_tracks, "Saved Tracks", "savedtracks")
-    GetAllPage(sp.current_user_saved_albums, "Saved Albums", "savedalbums")
-    GetAllPage(sp.current_user_playlists, "Saved Playlists", "playlists")
-    GetFullPlaylists()
-    GetFullPlaylistTracks()
+    needsAny = False
+    print("Checking if initial JSON files need to be acquired...")
+    if len(os.listdir(dirs['savedtracks'])) == 0:
+        needsAny = True
+        print("Nothing in Saved Tracks, acquiring...")
+        GetAllPage(sp.current_user_saved_tracks, "Saved Tracks", "savedtracks")
+    if len(os.listdir(dirs['savedalbums'])) == 0:
+        needsAny = True
+        print("Nothing in Saved Albums, acquiring...")
+        GetAllPage(sp.current_user_saved_albums, "Saved Albums", "savedalbums")
+    if len(os.listdir(dirs['playlists'])) == 0:
+        needsAny = True
+        print("Nothing in Playlists, acquiring...")
+        GetAllPage(sp.current_user_playlists, "Saved Playlists", "playlists")
+        GetFullPlaylists()
+        GetFullPlaylistTracks()
+    
+    if not needsAny:
+        print("Initial JSON was already acquired. Skipping to next step.")
     return
 
 
@@ -452,6 +517,7 @@ def RecurseParseAll():
     RecurseParse("PlaylistTracks", CurrentROrder)
     RecurseParse("Artists", CurrentROrder)
     RecurseParse("Albums", CurrentROrder)
+    RecurseParse("AudioFeatures",CurrentROrder)
     print("Number of Staged Saved Tracks: {}".format(len(StagedToAdd_SavedTracks)))
     print("Number of Staged Tracks: {}".format(len(StagedToAdd_Tracks)))
     print("Number of Staged Users: {}".format(len(StagedToAdd_Users)))
@@ -461,11 +527,15 @@ def RecurseParseAll():
     print("Number of Staged Playlists: {}".format(len(StagedToAdd_Playlists)))
     print("Number of Staged Playlist Tracks: {}".format(len(StagedToAdd_PlaylistTracks)))
     print("Number of Staged Saved Albums: {}".format(len(StagedToAdd_SavedAlbums)))
+    print("Number of Staged Audio Features: {}".format(len(StagedToAdd_AudioFeatures)))
+    print("Number of Staged Audio Analyses: {}".format(len(StagedToAdd_AudioAnalyses)))
 
 
     print("Number of Queued Albums: {}".format(len(QueuedAlbums)))
     print("Number of Queued Artists: {}".format(len(QueuedArists)))
-    print("Number of Staged Playlists: {}".format(len(StagedToAdd_Playlists)))
+    print("Number of Queued Audio Features: {}".format(len(QueuedAudioFeatures)))
+    print("Number of Queued Audio Analyses: {}".format(len(QueuedAudioAnalyses)))
+
     return
 
 def ParseJsonsToCollectedId(keyword):
@@ -498,14 +568,12 @@ def RecurseParse(kind, CurrentROrder):
         listOfSavedSongFiles.sort(key=natural_sort_key)
         for j in listOfSavedSongFiles:
             ParseSavedSongsToQueue(j, CurrentROrder)
-             # break #TODO get rid of this later. Only for testing
     elif kind == "SavedAlbums":
         resourceType = "savedalbums"
         listofSavedAlbumFiles = os.listdir(dirs[resourceType])
         listofSavedAlbumFiles.sort(key=natural_sort_key)
         for j in listofSavedAlbumFiles:
             ParseSavedAlbumsToQueue(j, CurrentROrder)
-             # break #TODO get rid of this later. Only for testing
     elif kind == "Playlists":
         resourceType = "playlists"
         listOfPlaylists = [x for x in os.listdir(dirs[resourceType]) if os.path.isdir(os.path.join(dirs[resourceType], x))]
@@ -536,6 +604,12 @@ def RecurseParse(kind, CurrentROrder):
         for abjson in listOfAlbums:
             fname = os.path.join(dirs[resourceType], abjson)
             ParseAlbumsToStaging(fname)
+    elif kind == "AudioFeatures":
+        resourceType = "audio_features"
+        listOfFeatureFiles = os.listdir(dirs[resourceType])
+        for fjson in listOfFeatureFiles:
+            fname = os.path.join(dirs[resourceType], fjson)
+            ParseAudioFeaturesToStaging(fname)
     return
 
 def ConstructCopyrightTuples(copyrights, albumid):
@@ -650,6 +724,10 @@ def InsertTracks(listOfTracks):
     relinkTuples = []
     for track in listOfTracks:
         trackid = track["id"]
+        if trackid not in CollectedAudioFeatures and trackid not in QueuedAudioFeatures:
+            QueuedAudioFeatures.append(trackid)
+        if trackid not in CollectedAudioAnalyses and trackid not in QueuedAudioAnalyses:
+            QueuedAudioAnalyses.append(trackid)
         markets = ','.join(track["available_markets"])
         disc = track['disc_number'] if 'disc_number' in track else 1
         duration = track['duration_ms'] if 'duration_ms' in track else 0
@@ -992,6 +1070,43 @@ def InsertUsers(listOfUsers):
     conn.commit()
     return
 
+def InsertAudioFeatures(listOfAudioFeatures):
+
+    FeatureTuples = []
+    for audio in listOfAudioFeatures:
+        trackid = audio["id"]
+        dance = audio["danceability"]
+        speechiness = audio["speechiness"]
+        loudness = audio["loudness"]
+        duration_ms = audio["duration_ms"]
+        time_signature = audio["time_signature"]
+        tempo = audio["tempo"]
+        uri = audio["uri"]
+        analysis_url = audio["analysis_url"]
+        instrumentalness = audio["instrumentalness"]
+        valence = audio["valence"]
+        acousticness = audio["acousticness"]
+        liveness = audio["liveness"]
+        mode = audio["mode"]
+        key = audio["key"]
+        energy = audio["energy"]
+        
+        tup = (trackid, acousticness, analysis_url, dance, duration_ms, energy, instrumentalness, key, liveness, loudness, mode, speechiness, tempo, time_signature, uri, valence)
+        FeatureTuples.append(tup)
+
+    query = "INSERT OR IGNORE INTO AudioFeatures (TrackId, Acousticness, AnalysisUrl, Danceability, DurationMs, Energy, Instrumentalness, Key, Liveness, Loudness, Mode, Speechiness, Tempo, TimeSignature, Uri, Valence) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+
+    c = conn.cursor()
+    c.executemany(query, FeatureTuples)
+    conn.commit()
+    print("Inserted {} audio features into database".format(len(listOfAudioFeatures)))
+
+    return
+
+def InsertAudioAnalyses(listOfAudioAnalyses):
+    return
+
 def InsertStagedUsers():
     InsertUsers(StagedToAdd_Users)
     StagedToAdd_Users.clear()
@@ -1000,38 +1115,57 @@ def InsertStagedUsers():
 def InsertStagedTracks():
     InsertTracks(StagedToAdd_Tracks)
     StagedToAdd_Tracks.clear()
+    return
 
 def InsertStagedSavedTracks():
     InsertSavedTracks(StagedToAdd_SavedTracks)
     StagedToAdd_SavedTracks.clear()
+    return
 
 def InsertStagedArtists():
     InsertArtists(StagedToAdd_Artists)
     StagedToAdd_Artists.clear()
+    return
 
 def InsertStagedAlbums():
     InsertAlbums(StagedToAdd_Albums)
     StagedToAdd_Albums.clear()
+    return
 
 def InsertStagedSavedAlbums():
     InsertSavedAlbums(StagedToAdd_SavedAlbums)
     StagedToAdd_SavedAlbums.clear()
+    return
 
 def InsertStagedAlbumTracks():
     InsertAlbumTracks(StagedToAdd_AlbumTracks)
     StagedToAdd_AlbumTracks.clear()
+    return
 
 def InsertStagedPlaylists():
     InsertPlaylists(StagedToAdd_Playlists)
     StagedToAdd_Playlists.clear()
+    return
 
 def InsertStagedPlaylistTracks():
     InsertPlaylistTracks(StagedToAdd_PlaylistTracks)
     StagedToAdd_PlaylistTracks.clear()
+    return
 
 def InsertStagedArtistAlbums():
     InsertArtistAlbums(StagedToAdd_AlbumArtists)
     StagedToAdd_AlbumArtists.clear()
+    return
+
+def InsertStagedAudioFeatures():
+    InsertAudioFeatures(StagedToAdd_AudioFeatures)
+    StagedToAdd_AudioFeatures.clear()
+    return
+
+def InsertStagedAudioAnalyses():
+    InsertAudioAnalyses(StagedToAdd_AudioAnalyses)
+    StagedToAdd_AudioAnalyses.clear()
+    return
 
 def InsertStagedAll():
     InsertStagedUsers()
@@ -1044,6 +1178,7 @@ def InsertStagedAll():
     InsertStagedArtistAlbums()
     InsertStagedPlaylists()
     InsertStagedPlaylistTracks()
+    InsertStagedAudioFeatures()
     return
 
 # Can't insert Saved Tracks or Playlists without a User present.
@@ -1078,10 +1213,11 @@ def Dq(queued,collected, spcall, keyword, lim=50):
          for x in 
          range(math.ceil(len(ReadyToGo)/lim))
     ]
-    print("{} batches in queue".format(len(batches)))
+    print("{} batches in {} queue".format(len(batches), keyword))
     startAt = len(os.listdir(dirs[keyword])) # for when it rate limits us.
     for i,batch in enumerate(batches[startAt:]):
-        print("fetching batch {}".format(startAt+i))
+        print(batch)
+        print("fetching {} batch {}".format(keyword, startAt+i))
         res = spcall(batch)
         SaveJson(dirs[keyword], "{}_{}.json".format(keyword, startAt+i), res)
     return
@@ -1098,10 +1234,16 @@ def DqTracks():
     Dq(QueuedTracks, CollectedTracks, sp.tracks, 'tracks')
     return
 
+def DqAudioFeatures():
+    Dq(QueuedAudioFeatures, CollectedAudioFeatures, sp.audio_features, "audio_features", 100)
+    return
+
 def DqAll():
     DqArtists()
     DqAlbums()
     DqTracks()
+    DqAudioFeatures()
+    return
     
 
 
@@ -1139,6 +1281,8 @@ def main():
     InsertStagedAll()
     # do another DQ items, do another RecurseParse, Insert.
     DqAll()
+    RecurseParseAll()
+    InsertStagedAll()
     CurrentROrder += 1
 
     return
