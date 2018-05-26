@@ -11,6 +11,14 @@ CREATE TABLE IF NOT EXISTS `Users` (
 	`Product`	TEXT,
 	PRIMARY KEY(`UserId`)
 );
+DROP TABLE IF EXISTS `UserFollowedArtists`;
+CREATE TABLE IF NOT EXISTS `UserFollowedArtists` (
+	`UserId`	TEXT NOT NULL,
+	`ArtistId`	TEXT NOT NULL,
+	FOREIGN KEY(`ArtistId`) REFERENCES `Artists`(`ArtistId`) ON DELETE CASCADE,
+	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`) ON DELETE CASCADE,
+	PRIMARY KEY(`UserId`,`ArtistId`)
+);
 DROP TABLE IF EXISTS `Tracks`;
 CREATE TABLE IF NOT EXISTS `Tracks` (
 	`TrackId`	NUMERIC,
@@ -33,9 +41,9 @@ CREATE TABLE IF NOT EXISTS `TrackRelinks` (
 	`TrackId`	TEXT NOT NULL,
 	`UnavailableMarket`	TEXT NOT NULL,
 	`AvailableTrackId`	INTEGER NOT NULL,
-	FOREIGN KEY(`AvailableTrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE,
+	FOREIGN KEY(`AvailableTrackId`) REFERENCES `Tracks`(`TrackId`),
 	PRIMARY KEY(`TrackId`,`UnavailableMarket`,`AvailableTrackId`),
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
 );
 DROP TABLE IF EXISTS `SavedTracks`;
 CREATE TABLE IF NOT EXISTS `SavedTracks` (
@@ -43,9 +51,9 @@ CREATE TABLE IF NOT EXISTS `SavedTracks` (
 	`TrackId`	TEXT NOT NULL,
 	`AddedAt`	DATETIME,
 	`IsLocal`	INTEGER NOT NULL,
-	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`) ON DELETE CASCADE,
 	PRIMARY KEY(`UserId`,`TrackId`),
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`) ON DELETE CASCADE
+	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`),
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
 );
 DROP TABLE IF EXISTS `SavedArtists`;
 CREATE TABLE IF NOT EXISTS `SavedArtists` (
@@ -61,9 +69,9 @@ CREATE TABLE IF NOT EXISTS `SavedAlbums` (
 	`UserId`	TEXT NOT NULL,
 	`AlbumId`	TEXT NOT NULL,
 	`AddedAt`	DATETIME,
+	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`),
 	PRIMARY KEY(`UserId`,`AlbumId`),
-	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`),
-	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`)
+	FOREIGN KEY(`UserId`) REFERENCES `Users`(`UserId`)
 );
 DROP TABLE IF EXISTS `Playlists`;
 CREATE TABLE IF NOT EXISTS `Playlists` (
@@ -85,9 +93,9 @@ CREATE TABLE IF NOT EXISTS `PlaylistTracks` (
 	`TrackId`	TEXT NOT NULL,
 	`AddedAt`	DATETIME NOT NULL,
 	`AddedBy`	TEXT NOT NULL,
-	FOREIGN KEY(`AddedBy`) REFERENCES `Users`(`UserId`),
-	FOREIGN KEY(`PlaylistId`) REFERENCES `Playlists`(`PlaylistId`),
 	PRIMARY KEY(`PlaylistId`,`TrackId`,`AddedAt`,`AddedBy`),
+	FOREIGN KEY(`PlaylistId`) REFERENCES `Playlists`(`PlaylistId`),
+	FOREIGN KEY(`AddedBy`) REFERENCES `Users`(`UserId`),
 	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
 );
 DROP TABLE IF EXISTS `PlayHistory`;
@@ -138,8 +146,8 @@ CREATE TABLE IF NOT EXISTS `Copyrights` (
 	`AlbumId`	TEXT,
 	`Text`	TEXT NOT NULL,
 	`Type`	TEXT NOT NULL,
-	PRIMARY KEY(`AlbumId`),
-	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`)
+	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`),
+	PRIMARY KEY(`AlbumId`)
 );
 DROP TABLE IF EXISTS `Categories`;
 CREATE TABLE IF NOT EXISTS `Categories` (
@@ -166,15 +174,15 @@ CREATE TABLE IF NOT EXISTS `AudioFeatures` (
 	`TimeSignature`	INTEGER,
 	`Uri`	TEXT,
 	`Valence`	DOUBLE,
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`),
-	PRIMARY KEY(`TrackId`)
+	PRIMARY KEY(`TrackId`),
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
 );
 DROP TABLE IF EXISTS `AudioAnalyses`;
 CREATE TABLE IF NOT EXISTS `AudioAnalyses` (
 	`TrackId`	TEXT,
 	`Json`	TEXT NOT NULL,
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`),
-	PRIMARY KEY(`TrackId`)
+	PRIMARY KEY(`TrackId`),
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`)
 );
 DROP TABLE IF EXISTS `Artists`;
 CREATE TABLE IF NOT EXISTS `Artists` (
@@ -190,17 +198,17 @@ DROP TABLE IF EXISTS `ArtistTrackMap`;
 CREATE TABLE IF NOT EXISTS `ArtistTrackMap` (
 	`ArtistId`	TEXT NOT NULL,
 	`TrackId`	TEXT NOT NULL,
-	PRIMARY KEY(`ArtistId`,`TrackId`),
 	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`),
-	FOREIGN KEY(`ArtistId`) REFERENCES `Artists`(`ArtistId`)
+	FOREIGN KEY(`ArtistId`) REFERENCES `Artists`(`ArtistId`),
+	PRIMARY KEY(`ArtistId`,`TrackId`)
 );
 DROP TABLE IF EXISTS `ArtistAlbumsMap`;
 CREATE TABLE IF NOT EXISTS `ArtistAlbumsMap` (
 	`AlbumId`	TEXT NOT NULL,
 	`ArtistId`	TEXT NOT NULL,
-	PRIMARY KEY(`AlbumId`,`ArtistId`),
+	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`),
 	FOREIGN KEY(`ArtistId`) REFERENCES `Artists`(`ArtistId`),
-	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`)
+	PRIMARY KEY(`AlbumId`,`ArtistId`)
 );
 DROP TABLE IF EXISTS `Albums`;
 CREATE TABLE IF NOT EXISTS `Albums` (
@@ -221,8 +229,25 @@ DROP TABLE IF EXISTS `AlbumTrackMap`;
 CREATE TABLE IF NOT EXISTS `AlbumTrackMap` (
 	`AlbumId`	TEXT NOT NULL,
 	`TrackId`	TEXT NOT NULL,
-	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`),
 	FOREIGN KEY(`AlbumId`) REFERENCES `Albums`(`AlbumId`),
+	FOREIGN KEY(`TrackId`) REFERENCES `Tracks`(`TrackId`),
 	PRIMARY KEY(`AlbumId`,`TrackId`)
+);
+DROP INDEX IF EXISTS `TrackName`;
+CREATE INDEX IF NOT EXISTS `TrackName` ON `Tracks` (
+	`Name`
+);
+DROP INDEX IF EXISTS `PlaylistTrackIndex`;
+CREATE INDEX IF NOT EXISTS `PlaylistTrackIndex` ON `PlaylistTracks` (
+	`PlaylistId`,
+	`TrackId`
+);
+DROP INDEX IF EXISTS `ArtistsName`;
+CREATE INDEX IF NOT EXISTS `ArtistsName` ON `Artists` (
+	`Name`	ASC
+);
+DROP INDEX IF EXISTS `AlbumName`;
+CREATE INDEX IF NOT EXISTS `AlbumName` ON `Albums` (
+	`Name`	ASC
 );
 COMMIT;
