@@ -36,10 +36,13 @@ dirs = {}
 CollectedArtists = []
 CollectedAlbums = []
 CollectedPlaylists = []
+CollectedPlaylistTracks = []
 CollectedTracks = []
-CollectedSavedTracks = []
-CollectedSavedAlbums = []
+CollectedSavedTracks = [] 
+CollectedSavedAlbums = [] 
 CollectedUsers = []
+CollectedAudioFeatures = []
+CollectedAudioAnalyses = []
 
 # Queued resource ids to fetch Full versions of, and then append to StagedToAdd
 QueuedArists = []
@@ -50,15 +53,8 @@ QueuedSavedTracks = []
 QueuedSavedAlbums = []
 QueuedPlaylistTracks = []
 QueuedUsers = []
-
-# in-memory mappings
-# format of:
-#       {id : [list of ids]}
-ArtistTrackMap = {}
-ArtistAlbumMap = {}
-AlbumTrackMap = {}
-UserPlaylistMap = {}
-UserSavedTracks = {}# [(added_at, trackid)
+QueuedAudioFeatures = []
+QueuedAudioAnalyses = []
 
 # Fully realized Json objects of items to add to respective tables
 # Items moved from StagedToAdd get their ids appended to the appropriate Collected list
@@ -71,22 +67,42 @@ StagedToAdd_PlaylistTracks = {} # Format of {PlaylistId: [ListOfTracks]}
 StagedToAdd_SavedAlbums = []
 StagedToAdd_Users = []
 StagedToAdd_AlbumTracks = {} # Format of {AlbumId: [ListOfTracks]}
-StagedToAdd_AlbumArtists = {} # FOrmat of {albumId: [ListOfArtistIds]}
+StagedToAdd_AlbumArtists = {} # Frmat of {albumId: [ListOfArtistIds]}
+StagedToAdd_AudioFeatures = [] 
+StagedToAdd_AudioAnalyses = []
+StagedToAdd_Copyrights = {} # Format of {albumId: [ListOfCopyrights]}
 
 def PopulateAlreadySeenItems():
     CollectedArtists.extend(populate("ArtistId", "Artists"))
+    CollectedArtists.extend(ParseJsonsToCollectedId("artists"))
+
     CollectedAlbums.extend(populate("AlbumId", "Albums"))
-    CollectedPlaylists.extend(populate("PlaylistId", "Playlists"))
+    CollectedAlbums.extend(ParseJsonsToCollectedId("albums"))
+
+    CollectedSavedAlbums.extend(populate("AlbumId", "Albums"))
+    
     CollectedTracks.extend(populate("TrackId", "Tracks"))
+    CollectedTracks.extend(ParseJsonsToCollectedId("tracks"))
+
+    CollectedSavedTracks.extend(populate("TrackId", "SavedTracks"))
+
     CollectedUsers.extend(populate("UserId", "Users"))
-    # TODO read Artists/Albums/Tracks dir, parse ids and add to Collected
-    # this will prevent duplicate runs from queuing up the same ids that are already
-    # downloaded and awaiting parsing
+    CollectedPlaylists.extend(populate("PlaylistId", "Playlists"))
+
+    CollectedAudioFeatures.extend(populate("TrackId", "AudioFeatures"))
+    CollectedAudioFeatures.extend(ParseJsonsToCollectedId("audiofeatures"))
+
+    CollectedAudioAnalyses.extend(populate("TrackId", "AudioAnalyses"))
+    CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audioanalyses"))
+
     return
 
-def populate(pkey, table):
+def populate(pkey, table, where = ""):
     c = conn.cursor()
-    q = "SELECT {} FROM {};".format(pkey, table)
+    q = "SELECT {} FROM {}".format(pkey, table)
+    if where is not "":
+        q += " WHERE {}".format(where)
+    q += ";"
     ids = []
     for row in c.execute(q):
         ids.append(row[0])
@@ -113,6 +129,8 @@ def ScrapeSetup():
     dirSetup(dirs['raw'], 'toptracks_shortterm')
     dirSetup(dirs['raw'], 'toptracks_mediumterm')
     dirSetup(dirs['raw'], 'toptracks_longterm')
+    dirSetup(dirs['raw'], 'audioanalyses')
+    dirSetup(dirs['raw'], 'audiofeatures')
 
 def dirSetup(p, s):
     dirs[s] = os.path.join(p, s)
@@ -343,6 +361,50 @@ def ParsePlaylistToQueue(fname, playlistid, order):
     return
 
 
+def ParseArtistsToStaging(fname):
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        items = j['artists']
+        if items is not None:
+            for artist in items:
+                StagedToAdd_Artists.append(artist)
+    return
+
+def ParseAlbumsToStaging(fname):
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        items = j['albums']
+        if items is not None:
+            for album in items:
+                albumid = album["id"]
+                StagedToAdd_Albums.append(album)
+                artists = album["artists"]                
+                if artists is not None:
+                    for artist in artists:
+                        artistId = artist["id"] # id
+                        if artistId not in CollectedArtists and artistId not in QueuedArists:
+                            pass
+                            #QueuedArists.append(artistId) #set-like record of ids
+                            # does not get appended to StagedToAdd_Artist because
+                            # this is a Simple Artist. We need to get the Full Artist.
+                        if albumid not in StagedToAdd_AlbumArtists:
+                            StagedToAdd_AlbumArtists[albumid] = [artistId]
+                        elif artistId not in StagedToAdd_AlbumArtists[albumid]:
+                            StagedToAdd_AlbumArtists[albumid].append(artistId)                            
+                tracks = album["tracks"]["items"]
+                if tracks is not None:
+                    for track in tracks:
+                        trackid = track["id"]
+                        if trackid not in CollectedTracks:
+                            CollectedTracks.append(trackid)
+                            StagedToAdd_Tracks.append(track)
+                        if albumid not in StagedToAdd_AlbumTracks:
+                            StagedToAdd_AlbumTracks[albumid] = [trackid]
+                        else:
+                            StagedToAdd_AlbumTracks[albumid].append(trackid)
+                
+    return
+
 def ParsePlaylistTracksToQueue(fname, playlistid, order):
     with open(fname, 'r') as f:
         j = json.load(f)
@@ -378,10 +440,18 @@ def AcquireInitialJson():
 
 
 def RecurseParseAll():
+    """
+    Grouping method to parse a bunch of items that we've downloaded and place them into 
+    the database.
+
+    returns void
+    """
     RecurseParse("SavedSongs", CurrentROrder)
     RecurseParse("SavedAlbums", CurrentROrder)
     RecurseParse("Playlists", CurrentROrder)
     RecurseParse("PlaylistTracks", CurrentROrder)
+    RecurseParse("Artists", CurrentROrder)
+    RecurseParse("Albums", CurrentROrder)
     print("Number of Staged Saved Tracks: {}".format(len(StagedToAdd_SavedTracks)))
     print("Number of Staged Tracks: {}".format(len(StagedToAdd_Tracks)))
     print("Number of Staged Users: {}".format(len(StagedToAdd_Users)))
@@ -398,35 +468,74 @@ def RecurseParseAll():
     print("Number of Staged Playlists: {}".format(len(StagedToAdd_Playlists)))
     return
 
+def ParseJsonsToCollectedId(keyword):
+    """
+    Given a keyword, and thus a directory like 'artists' or 'albums',
+    retrieve any stored json from it and parse its id's to the a list
+    This list can be used to extend a Collected or Staged list of ids
+    This is so we can avoid double-downloading a resource we already have.
+
+    Returns a list of ids
+    """
+    extendableids = []
+    listOfArtits = os.listdir(dirs[keyword])
+    for ajson in listOfArtits:
+        fname = os.path.join(dirs[keyword], ajson)
+        with open(fname) as f:
+            j = json.load(f)
+            if keyword in j and len(j[keyword]) > 0:
+                for item in j[keyword]:
+                    extendableids.append(item["id"])
+    print("extending by a further {} items".format(len(extendableids)))
+    return extendableids
+
+
 def RecurseParse(kind, CurrentROrder):
+    resourceType = ""
     if kind == "SavedSongs":
-        listOfSavedSongFiles = os.listdir(dirs["savedtracks"])
+        resourceType="savedtracks"
+        listOfSavedSongFiles = os.listdir(dirs[resourceType])
         listOfSavedSongFiles.sort(key=natural_sort_key)
         for j in listOfSavedSongFiles:
             ParseSavedSongsToQueue(j, CurrentROrder)
              # break #TODO get rid of this later. Only for testing
     elif kind == "SavedAlbums":
-        listofSavedAlbumFiles = os.listdir(dirs["savedalbums"])
+        resourceType = "savedalbums"
+        listofSavedAlbumFiles = os.listdir(dirs[resourceType])
         listofSavedAlbumFiles.sort(key=natural_sort_key)
         for j in listofSavedAlbumFiles:
             ParseSavedAlbumsToQueue(j, CurrentROrder)
              # break #TODO get rid of this later. Only for testing
     elif kind == "Playlists":
-        listOfPlaylists = [x for x in os.listdir(dirs["playlists"]) if os.path.isdir(os.path.join(dirs["playlists"], x))]
+        resourceType = "playlists"
+        listOfPlaylists = [x for x in os.listdir(dirs[resourceType]) if os.path.isdir(os.path.join(dirs[resourceType], x))]
         for pl in listOfPlaylists:
-            p = os.path.join(dirs["playlists"], pl)
+            p = os.path.join(dirs[resourceType], pl)
             listOfDetails = [os.path.join(p,x) for x in os.listdir(p) if os.path.isfile(os.path.join(p, x))]
             for detail in listOfDetails:
                 ParsePlaylistToQueue(detail, pl, CurrentROrder)
     elif kind == "PlaylistTracks":
-        listOfPlaylists = os.listdir(dirs["playlists"])
-        listOfPlaylists = [x for x in listOfPlaylists if os.path.isdir(os.path.join(dirs["playlists"], x))]
+        resourceType = "playlists"
+        listOfPlaylists = os.listdir(dirs[resourceType])
+        listOfPlaylists = [x for x in listOfPlaylists if os.path.isdir(os.path.join(dirs[resourceType], x))]
         for pl in listOfPlaylists:            
-            listofPTOs = os.listdir(os.path.join(dirs["playlists"], pl, "tracks"))
+            listofPTOs = os.listdir(os.path.join(dirs[resourceType], pl, "tracks"))
             listofPTOs.sort(key=natural_sort_key)
             for ptopage in listofPTOs:
-                p = os.path.join(dirs["playlists"], pl, "tracks", ptopage)
+                p = os.path.join(dirs[resourceType], pl, "tracks", ptopage)
                 ParsePlaylistTracksToQueue(p, pl, CurrentROrder)
+    elif kind == "Artists":
+        resourceType = "artists"
+        listOfArtits = os.listdir(dirs[resourceType])
+        for ajson in listOfArtits:
+            fname = os.path.join(dirs[resourceType], ajson)
+            ParseArtistsToStaging(fname)
+    elif kind == "Albums":
+        resourceType = "albums"
+        listOfAlbums = os.listdir(dirs[resourceType])
+        for abjson in listOfAlbums:
+            fname = os.path.join(dirs[resourceType], abjson)
+            ParseAlbumsToStaging(fname)
     return
 
 def ConstructCopyrightTuples(copyrights, albumid):
@@ -590,7 +699,7 @@ def InsertAlbums(listOfAlbums):
         ei = album["external_ids"] if "external_ids" in album else None
         eu = album["external_urls"] if "external_urls" in album else None
         images = album["images"] if "images" in album else None
-        copyrights = album["copyright"] if "copyright" in album else None
+        copyrights = album["copyrights"] if "copyrights" in album else None
         popularity = album["popularity"] if "popularity" in album else None
 
         # Album
@@ -672,7 +781,7 @@ def InsertArtists(listOfArtists):
         VALUES (?, ?, ?, ?, ?, ?);"    
     for artist in listOfArtists:
         aid = artist["id"] 
-        genre = artist["genres"] if "genres" in artist else []    
+        genre = ",".join(artist["genres"]) if "genres" in artist else ""   
         href = artist["href"] if "href" in artist else ""
         name = artist["name"] if "name" in artist else ""
         pop = artist["popularity"] if "popularity" in artist else 0
@@ -953,6 +1062,7 @@ def GetUser():
     return
 
 def Dq(queued,collected, spcall, keyword, lim=50):
+    print("Dequeuing {} items from {}".format(len(queued),keyword))
     ReadyToGo = []    
     for id in queued:
         if id not in collected:
@@ -979,6 +1089,19 @@ def Dq(queued,collected, spcall, keyword, lim=50):
 def DqArtists():
     Dq(QueuedArists, CollectedArtists, sp.artists, 'artists')
     return
+
+def DqAlbums():
+    Dq(QueuedAlbums, CollectedAlbums, sp.albums, 'albums', 20)
+    return
+
+def DqTracks():
+    Dq(QueuedTracks, CollectedTracks, sp.tracks, 'tracks')
+    return
+
+def DqAll():
+    DqArtists()
+    DqAlbums()
+    DqTracks()
     
 
 
@@ -1010,11 +1133,12 @@ def main():
     RefreshSpotifyTokens()
     ScrapeSetup()
     GetUser()
-    #AcquireInitialJson()
+    AcquireInitialJson()
     PopulateAlreadySeenItems()
     RecurseParseAll()
     InsertStagedAll()
-    DqArtists()
+    # do another DQ items, do another RecurseParse, Insert.
+    DqAll()
     CurrentROrder += 1
 
     return
