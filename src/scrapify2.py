@@ -16,10 +16,6 @@
 #           2) Queue Tracks
 #           3) Insert
 #       e) New Releases
-#   2) User Followed Artists
-#       a) Collect from DB
-#       b) Queue to Artists
-#       c) Insert to UserFollowedArtists
 
 import json
 import math
@@ -67,6 +63,8 @@ CollectedUsers = []
 CollectedAudioFeatures = []
 CollectedAudioAnalyses = []
 CollectedFollowed = {}
+CollectedCategories = []
+CollectedCategoryPlaylists = {}
 
 # Queued resource ids to fetch Full versions of, and then append to StagedToAdd
 QueuedArists = []
@@ -126,7 +124,7 @@ def PopulateAlreadySeenItems():
     CollectedAudioAnalyses.extend(populate("TrackId", "AudioAnalyses"))
     CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audio_analyses"))
 
-
+    CollectedFollowed.update(UpdateFollowedArtists())
 
     for trackid in CollectedTracks:
         if trackid not in CollectedAudioFeatures:
@@ -135,6 +133,21 @@ def PopulateAlreadySeenItems():
             QueuedAudioAnalyses.append(trackid)
 
     return
+
+def UpdateFollowedArtists():
+    d = {}
+    c = conn.cursor()
+    q = "SELECT UserId, ArtistId FROM UserFollowedArtists"
+    for row in c.execute(q):
+        uid = row[0]
+        aid = row[1]
+        if uid in d:
+            d[uid].append(aid)
+        else:
+            d[uid] = [aid]
+    c.close()
+    print("Found {} users following artists already.".format(len(d)))
+    return d
 
 def populate(pkey, table, where = ""):
     c = conn.cursor()
@@ -243,7 +256,7 @@ def GetPage(func, endpoint_full, endpoint_short, off = 0, lim = 50):
     else:
         print("Retrieved page, saving to disk")
         didSave = SaveJson(dirs[endpoint_short], "{2}_{0}_{1}.json".format(lim, off, endpoint_short), page)
-        return page['next'] or not didSave
+        return page['next'] if 'next' in page else not didSave
 
 def GetAllPage(func, endpoint_full, endpoint_short):
     Cont = True
@@ -538,9 +551,12 @@ def ParseFollowedArtistsToQueue(fname, userid):
                 if aid not in CollectedArtists and aid not in QueuedArists:
                     QueuedArists.append(aid)
                     counter += 1
-                # TODO finish
-                # if aid not in StagedToAdd_Followed and (userid not in CollectedFollowed or  aid not in CollectedFollowed[userid]):
-                #     if Stagedt
+                if userid not in CollectedFollowed and userid not in StagedToAdd_Followed:
+                    StagedToAdd_Followed[userid] = [aid]
+                    CollectedFollowed[userid] = [aid]
+                if userid in StagedToAdd_Followed and aid not in StagedToAdd_Followed[userid]:
+                    StagedToAdd_Followed[userid].append(aid)
+                    CollectedFollowed[userid].append(aid)
 
     print("Added another {} artists to the artist queue".format(counter))
     return
@@ -683,10 +699,11 @@ def RecurseParse(kind, CurrentROrder):
         resourceType = "artists"
         listOfUsers = os.listdir(dirs["follows"])
         for u in listOfUsers:
-            listofUserFollowedArtists = os.listdir(dirs["follows"], u)
+            p = os.path.join(dirs["follows"], u)
+            listofUserFollowedArtists = os.listdir(p)
             for fjson in listofUserFollowedArtists:
-                p = os.path.join(dirs["follows"], u, fjson)
-                ParseFollowedArtistsToQueue(fjson, user)
+                p2 = os.path.join(p, fjson)
+                ParseFollowedArtistsToQueue(p2, user)
 
     return
 
@@ -1181,6 +1198,21 @@ def InsertAudioFeatures(listOfAudioFeatures):
 
     return
 
+def InsertFollowedArtists(dictOfFollowedArtists):
+    FollowedTuples = []
+    for uid in dictOfFollowedArtists:
+        for aid in dictOfFollowedArtists[uid]:
+            t = (uid, aid)
+            FollowedTuples.append(t)
+    query = "INSERT OR IGNORE INTO UserFollowedArtists (UserId, ArtistId) VALUES (?,?);"
+    c = conn.cursor()
+    c.executemany(query, FollowedTuples)
+    c.close()
+    conn.commit()
+    print("Inserted {} followed artists into database".format(len(FollowedTuples)))
+    return
+
+
 def InsertAudioAnalyses(listOfAudioAnalyses):
     return
 
@@ -1244,6 +1276,11 @@ def InsertStagedAudioAnalyses():
     StagedToAdd_AudioAnalyses.clear()
     return
 
+def InsertStagedFollowedArtists():
+    InsertFollowedArtists(StagedToAdd_Followed)
+    StagedToAdd_Followed.clear()
+    return
+
 def InsertStagedAll():
     InsertStagedUsers()
     InsertStagedTracks()
@@ -1253,6 +1290,7 @@ def InsertStagedAll():
     InsertStagedSavedAlbums()
     InsertStagedAlbumTracks()
     InsertStagedArtistAlbums()
+    InsertStagedFollowedArtists()
     InsertStagedPlaylists()
     InsertStagedPlaylistTracks()
     InsertStagedAudioFeatures()
