@@ -459,3 +459,4 @@ src/raw/
 src/.cache-*
 .cache-*
 src/tpy.db
+.vscode/
