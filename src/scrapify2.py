@@ -518,9 +518,10 @@ def ParseAlbumsToStaging(fname):
                         artistId = artist["id"] # id
                         if artistId not in CollectedArtists and artistId not in QueuedArtists:
                             CollectedArtists.append(artistId)
-                            #QueuedArtists.append(artistId) #set-like record of ids
                             # does not get appended to StagedToAdd_Artist because
-                            # this is a Simple Artist. We need to get the Full Artist.
+                            # this is a Simple Artist. We need to get the Full Artist
+
+                        # TODO I think this is where the duplicate entries are coming from.
                         if albumid not in StagedToAdd_AlbumArtists:
                             StagedToAdd_AlbumArtists[albumid] = [artistId]
                         elif artistId not in StagedToAdd_AlbumArtists[albumid]:
