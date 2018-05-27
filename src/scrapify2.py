@@ -42,7 +42,7 @@ CurrentUserMarket = 'US'
 conn = None #initialized in Setup Database
 
 ROrder = 1
-CurrentROrder = 1
+CurrentROrder = 0
 
 # List of Directories to create and write json data to.
 # Organized by Type. i.e.
@@ -65,9 +65,10 @@ CollectedAudioAnalyses = []
 CollectedFollowed = {}
 CollectedCategories = []
 CollectedCategoryPlaylists = {}
+CollectedFeaturedPlaylists = {} #Format of {message: [list of PlaylistIds]}
 
 # Queued resource ids to fetch Full versions of, and then append to StagedToAdd
-QueuedArists = []
+QueuedArtists = []
 QueuedAlbums = []
 QueuedPlaylists = []
 QueuedTracks = []
@@ -93,6 +94,9 @@ StagedToAdd_AlbumArtists = {} # Frmat of {albumId: [ListOfArtistIds]}
 StagedToAdd_AudioFeatures = [] 
 StagedToAdd_AudioAnalyses = []
 StagedToAdd_Followed = {} # Format of {UserId: [FollowedItem]}
+StagedToAdd_Categories = []
+StagedToAdd_CategoryPlaylists = {} # Format of {CategoryId: [Playlists]}
+StagedToAdd_FeaturedPlaylists = {} # Format of {Message: [Playlists]
 
 # def PopulateExtendNoDups(lst, extended):
 #     appender = []
@@ -124,7 +128,10 @@ def PopulateAlreadySeenItems():
     CollectedAudioAnalyses.extend(populate("TrackId", "AudioAnalyses"))
     CollectedAudioAnalyses.extend(ParseJsonsToCollectedId("audio_analyses"))
 
-    CollectedFollowed.update(UpdateFollowedArtists())
+    CollectedFollowed.update(Update2MapDict("UserId", "ArtistId", "UserFollowedArtists"))
+
+    CollectedCategories.extend(populate("CategoryId", "Categories"))
+    CollectedCategoryPlaylists.update(Update2MapDict("CategoryId", "PlaylistId", "CategoryPlaylists"))
 
     for trackid in CollectedTracks:
         if trackid not in CollectedAudioFeatures:
@@ -134,19 +141,19 @@ def PopulateAlreadySeenItems():
 
     return
 
-def UpdateFollowedArtists():
+def Update2MapDict(keyA, keyB, table):
     d = {}
     c = conn.cursor()
-    q = "SELECT UserId, ArtistId FROM UserFollowedArtists"
+    q = "SELECT {}, {} FROM {};".format(keyA, keyB, table)
     for row in c.execute(q):
-        uid = row[0]
-        aid = row[1]
-        if uid in d:
-            d[uid].append(aid)
+        idA = row[0]
+        idB = row[1]
+        if idA in d:
+            d[idA].append(idB)
         else:
-            d[uid] = [aid]
+            d[idA] = [idB]
     c.close()
-    print("Found {} users following artists already.".format(len(d)))
+    print("Found {} {} in {} already.".format(len(d), keyA, table))
     return d
 
 def populate(pkey, table, where = ""):
@@ -185,6 +192,8 @@ def ScrapeSetup():
     dirSetup(dirs['raw'], 'audio_analyses')
     dirSetup(dirs['raw'], 'audio_features')
     dirSetup(dirs['raw'], 'follows')
+    dirSetup(dirs['raw'], 'categories')
+    dirSetup(dirs['raw'], "featured")
     return
 
 def SetupDatabase():
@@ -273,7 +282,13 @@ def GetFullItem(func, type, id):
     try:
         os.makedirs(dirs[t])
     except FileExistsError:
+        # If it exists, we're good. No need to overrwrite, just ignore it.
         pass
+    return
+
+def GetFullCategoryPlaylists(categoryId):
+    # TODO 
+    return False
        
 def GetFullPlaylist(userid, id):
     p = os.path.join(dirs['raw'], 'playlists', id)
@@ -322,6 +337,27 @@ def LoadAndReadPlaylists():
             pls.append((owner, id))
     return pls
 
+def LoadAndReadCategoryIds():
+    p = dirs["categories"]
+    pages = [f for f in os.listdir(p) if os.path.isfile(os.path.join(p, f))]
+    cats = []
+    for page in pages:
+        j = json.load(open(os.path.join(p, page), 'r'))
+        for cat in j["items"]:
+            id = cat["id"]
+            cats.append(id)
+    return cats
+
+def GetCategoryPlaylists():
+    categories = LoadAndReadCategoryIds() #[ids]
+    Cont = True
+    for cat in categories:
+        if not Cont:
+            break
+        else:
+            Cont = GetFullCategoryPlaylists(cat)
+    return
+
 def GetFullPlaylists():
     pls = LoadAndReadPlaylists()
     Cont = True
@@ -330,6 +366,7 @@ def GetFullPlaylists():
             break
         else:
             Cont = GetFullPlaylist(pl[0], pl[1])
+    return
 
 def GetFullPlaylistTracks():
     pls = LoadAndReadPlaylists()
@@ -385,14 +422,16 @@ def ParseSavedSongsToQueue(fname, order):
                 if artists is not None:
                     for artist in artists:
                         artistId = artist["id"] # id
-                        if artistId not in CollectedArtists and artistId not in QueuedArists:
-                            QueuedArists.append(artistId) #set-like record of ids
+                        if artistId not in CollectedArtists and artistId not in QueuedArtists:
+                            QueuedArtists.append(artistId) #set-like record of ids
+                            CollectedArtists.append(artistId)
                             # does not get appended to StagedToAdd_Artist because
                             # this is a Simple Artist. We need to get the Full Artist.
                 if album is not None:
                     albumId = album["id"]
                     if albumId not in CollectedAlbums and albumId not in QueuedAlbums:
                         QueuedAlbums.append(albumId) #set-like record of ids
+                        CollectedAlbums.append(albumId)
                         # does not get appened to StageToAdd_Album because
                         # this is a Simple Album. We need the Full Album.
     return
@@ -410,15 +449,18 @@ def ParseSavedAlbumsToQueue(fname, order):
                 artists = album["artists"]
                 if albumid not in CollectedAlbums and albumid not in QueuedAlbums:
                     StagedToAdd_Albums.append(album)
+                    CollectedAlbums.append(albumid)
                     #Not added to Queued because it is a Full item
                 if albumid not in CollectedSavedAlbums and albumid not in QueuedSavedAlbums:
                     StagedToAdd_SavedAlbums.append((albumid, added_at))
+                    CollectedSavedAlbums.append(albumid)
                     #Not added to queued because it is a Full item
                 if artists is not None:
                     for artist in artists:
                         artistId = artist["id"] # id
-                        if artistId not in CollectedArtists and artistId not in QueuedArists:
-                            QueuedArists.append(artistId) #set-like record of ids
+                        if artistId not in CollectedArtists and artistId not in QueuedArtists:
+                            QueuedArtists.append(artistId) #set-like record of ids
+                            CollectedArtists.append(artistId)
                             # does not get appended to StagedToAdd_Artist because
                             # this is a Simple Artist. We need to get the Full Artist.
                 tracks = album["tracks"]["items"]
@@ -431,11 +473,6 @@ def ParseSavedAlbumsToQueue(fname, order):
                             StagedToAdd_AlbumTracks[albumid] = [trackid]
                         else:
                             StagedToAdd_AlbumTracks[albumid].append(trackid)
-                # addme = (albumid, added_at)
-                # if addme not in StagedToAdd_SavedAlbums:
-                #     StagedToAdd_SavedAlbums[albumid] = [addme]
-                # else:
-                #     StagedToAdd_SavedAlbums[albumid].append(addme)
     return
 
 def ParsePlaylistToQueue(fname, playlistid, order):
@@ -473,14 +510,15 @@ def ParseAlbumsToStaging(fname):
         if items is not None:
             for album in items:
                 albumid = album["id"]
-                StagedToAdd_Albums.append(album)
-                artists = album["artists"]                
+                artists = album["artists"]      
+                if albumid not in CollectedAlbums and albumid not in QueuedAlbums:    
+                    StagedToAdd_Albums.append(album)     
                 if artists is not None:
                     for artist in artists:
                         artistId = artist["id"] # id
-                        if artistId not in CollectedArtists and artistId not in QueuedArists:
-                            pass
-                            #QueuedArists.append(artistId) #set-like record of ids
+                        if artistId not in CollectedArtists and artistId not in QueuedArtists:
+                            CollectedArtists.append(artistId)
+                            #QueuedArtists.append(artistId) #set-like record of ids
                             # does not get appended to StagedToAdd_Artist because
                             # this is a Simple Artist. We need to get the Full Artist.
                         if albumid not in StagedToAdd_AlbumArtists:
@@ -509,7 +547,7 @@ def ParseAudioFeaturesToStaging(fname):
         arr = j["audio_features"] if "audio_features" in j else j 
         for audio in arr:
             trackid = audio["id"]
-            if trackid not in CollectedAudioAnalyses and audio not in StagedToAdd_AudioFeatures:
+            if trackid not in CollectedAudioFeatures and audio not in StagedToAdd_AudioFeatures:
                 StagedToAdd_AudioFeatures.append(audio)
         return
 
@@ -548,8 +586,9 @@ def ParseFollowedArtistsToQueue(fname, userid):
         if "artists" in j:
             for artist in j["artists"]["items"]:
                 aid = artist["id"]
-                if aid not in CollectedArtists and aid not in QueuedArists:
-                    QueuedArists.append(aid)
+                if aid not in CollectedArtists and aid not in QueuedArtists:
+                    QueuedArtists.append(aid)
+                    CollectedArtists.append(aid)
                     counter += 1
                 if userid not in CollectedFollowed and userid not in StagedToAdd_Followed:
                     StagedToAdd_Followed[userid] = [aid]
@@ -582,7 +621,15 @@ def AcquireInitialJson():
         needsAny = True
         print("Nothing in Follows, acquiring...")
         GetUserFollows()
-
+    if len(os.listdir(dirs['categories'])) == 0:
+        needsAny = True
+        print("Nothing in Categories, acquiring...")
+        # GetAllPage(sp.categories, "Categories", "categories")
+        #GetCategoryPlaylists()
+    if len(os.listdir(dirs['featured'])) == 0:
+        needsAny = True
+        print("Nothing in Featured, acquiring...")
+        #GetFeaturedPlaylists()
     if not needsAny:
         print("Initial JSON was already acquired. Skipping to next step.")
     return
@@ -617,7 +664,7 @@ def RecurseParseAll():
 
 
     print("Number of Queued Albums: {}".format(len(QueuedAlbums)))
-    print("Number of Queued Artists: {}".format(len(QueuedArists)))
+    print("Number of Queued Artists: {}".format(len(QueuedArtists)))
     print("Number of Queued Audio Features: {}".format(len(QueuedAudioFeatures)))
     print("Number of Queued Audio Analyses: {}".format(len(QueuedAudioAnalyses)))
 
@@ -1212,8 +1259,70 @@ def InsertFollowedArtists(dictOfFollowedArtists):
     print("Inserted {} followed artists into database".format(len(FollowedTuples)))
     return
 
-
 def InsertAudioAnalyses(listOfAudioAnalyses):
+    return
+
+def InsertCategories(listOfCategories):
+    catTuples = []
+    imageTuples = []
+    resourceType = "category"
+
+    qMain = "INSERT OR IGNORE INTO Categories (CategoryId, Name, Href) VALUES (?,?,?)"
+    qImage = "INSERT OR IGNORE INTO Images (ResourceId, Type, Height, Width, Url\
+                VALUES (?,?,?,?,?);"
+    for category in listOfCategories:
+        cid = category["id"]
+        name = category["name"]
+        href = category["href"]
+        images = category["icons"]
+
+        # Icons
+        iconTup = ConstructImageTuple(images, cid, resourceType)
+        imageTuples.extend(iconTup)
+
+        ctup = (cid, name, href)
+        catTuples.append(ctup)
+
+    # Main Insert
+    c = conn.cursor()
+    c.executemany(qMain, catTuples)
+
+    # Image Insert
+    if imageTuples is not None and len(imageTuples) > 0:
+        c.executemany(qImage, imageTuples)
+    
+    c.close()
+    conn.commit()
+
+    print("Inserted {} categories into database".format(len(catTuples)))
+    return
+
+def InsertCategoryPlaylists(dictOfCatPlaylists):
+    catTups = []
+    qMain = "INSERT OR IGNORE INTO CategoryPlaylists (CategoryId, PlaylistId) VALUES (?, ?);"
+    for catid in dictOfCatPlaylists:
+        for playlistid in dictOfCatPlaylists[catid]:
+            t = (catid, playlistid)
+            catTups.append(t)
+    c = conn.cursor()
+    c.executemany(qMain, catTups)
+    c.close()
+    conn.commit()
+    print("Inserted {} category playlists into database".format(len(catTups)))
+    return
+
+def InsertFeaturedPlaylists(dictOfFeaturedPlaylists):
+    plTups = []
+    qMain = "INSERT OR IGNORE INTO FeaturedPlaylists (Message, PlaylistId) VALUES (?, ?);"
+    for message in dictOfFeaturedPlaylists:
+        for playlistid in dictOfFeaturedPlaylists[message]:
+            t = (message, playlistid)
+            plTups.append(t)
+    c = conn.cursor()
+    c.executemany(qMain, plTups)
+    c.close()
+    conn.commit()
+    print("Inserted {} featured playlists into database".format(len(plTups)))
     return
 
 def InsertStagedUsers():
@@ -1281,7 +1390,26 @@ def InsertStagedFollowedArtists():
     StagedToAdd_Followed.clear()
     return
 
+def InsertStagedCategories():
+    InsertCategories(StagedToAdd_Categories)
+    StagedToAdd_Categories.clear()
+    return 
+
+def InsertStagedCategoryPlaylists():
+    InsertCategoryPlaylists(StagedToAdd_CategoryPlaylists)
+    StagedToAdd_CategoryPlaylists.clear()
+    return
+
+def InsertStagedFeaturedPlaylists():
+    InsertFeaturedPlaylists(StagedToAdd_FeaturedPlaylists)
+    StagedToAdd_FeaturedPlaylists.clear()
+    return
+
+
 def InsertStagedAll():
+    """
+    The order is important due to foreign key relationships.
+    """
     InsertStagedUsers()
     InsertStagedTracks()
     InsertStagedSavedTracks()
@@ -1294,6 +1422,9 @@ def InsertStagedAll():
     InsertStagedPlaylists()
     InsertStagedPlaylistTracks()
     InsertStagedAudioFeatures()
+    InsertStagedCategories()
+    InsertStagedCategoryPlaylists()
+    InsertStagedFeaturedPlaylists()
     return
 
 # Can't insert Saved Tracks or Playlists without a User present.
@@ -1338,7 +1469,7 @@ def Dq(queued,collected, spcall, keyword, lim=50):
     return
 
 def DqArtists():
-    Dq(QueuedArists, CollectedArtists, sp.artists, 'artists')
+    Dq(QueuedArtists, CollectedArtists, sp.artists, 'artists')
     return
 
 def DqAlbums():
@@ -1384,6 +1515,14 @@ def DqAll():
 #   11) for d in dirs: RecurseParse(d)
 #   12) Write Staged Items to Database.
 
+def OrderLoop():
+    global CurrentROrder
+    while CurrentROrder <= ROrder:
+        DqAll()
+        RecurseParseAll()
+        InsertStagedAll()
+        CurrentROrder += 1
+    return
 
 def main():
     global CurrentROrder
@@ -1392,13 +1531,14 @@ def main():
     GetUser()
     AcquireInitialJson()
     PopulateAlreadySeenItems()
-    RecurseParseAll()
-    InsertStagedAll()
-    # do another DQ items, do another RecurseParse, Insert.
-    DqAll()
-    RecurseParseAll()
-    InsertStagedAll()
-    CurrentROrder += 1
+    OrderLoop()
+    # RecurseParseAll()
+    # InsertStagedAll()
+    # # do another DQ items, do another RecurseParse, Insert.
+    # DqAll()
+    # RecurseParseAll()
+    # InsertStagedAll()
+    # CurrentROrder += 1
 
     return
 
