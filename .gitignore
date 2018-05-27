@@ -458,3 +458,4 @@ lyricall/lyricalllog.txt
 src/raw/
 src/.cache-*
 .cache-*
+src/tpy.db
