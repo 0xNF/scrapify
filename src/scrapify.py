@@ -82,6 +82,7 @@ QueuedAudioAnalyses = []
 # Fully realized Json objects of items to add to respective tables
 # Items moved from StagedToAdd get their ids appended to the appropriate Collected list
 StagedToAdd_Tracks = []
+StagedToAdd_TrackRelinks = [] # Appended to by InsertTracks, but can't be acted upon until the tracks are dequeued.
 StagedToAdd_Albums = []
 StagedToAdd_Artists = []
 StagedToAdd_SavedTracks = []
@@ -215,7 +216,6 @@ def SetupDatabase():
             conn.executescript(s)
         conn.commit()
         print("Created sqlite database")
-        exit()
     return
 
 def dirSetup(p, s):
@@ -398,6 +398,35 @@ def GetUserFollows():
     print("Fetched All User {}'s Follows Artists".format(user))
     return
 
+def ParseTracksToStaging(fname, order):
+    with open(fname, 'r') as f:
+        j = json.load(f)
+        items = j['tracks']
+        if items is not None:
+            for track in items:
+                trackid = track["id"]
+                artists = track["artists"]
+                album = track["album"]
+                if trackid not in CollectedTracks and trackid not in QueuedTracks:
+                    print("added trackid {} to Staged".format(trackid))                    
+                    StagedToAdd_Tracks.append(track)
+                    CollectedTracks.append(trackid) #set-like record of ids
+                if artists is not None:
+                    for artist in artists:
+                        artistId = artist["id"] # id
+                        if artistId not in CollectedArtists and artistId not in QueuedArtists:
+                            QueuedArtists.append(artistId) #set-like record of ids
+                            CollectedArtists.append(artistId)
+                            # does not get appended to StagedToAdd_Artist because
+                            # this is a Simple Artist. We need to get the Full Artist.
+                if album is not None:
+                    albumId = album["id"]
+                    if albumId not in CollectedAlbums and albumId not in QueuedAlbums:
+                        QueuedAlbums.append(albumId) #set-like record of ids
+                        CollectedAlbums.append(albumId)
+                        # does not get appened to StageToAdd_Album because
+                        # this is a Simple Album. We need the Full Album.
+    return
 # The goal of any ParseToQueue function is to assemble either:
 # a) the full JObject of an item ready for inserting into the Database, or
 # b) IDs of related items that need to be queued and then parsed themselves.
@@ -643,6 +672,7 @@ def RecurseParseAll():
 
     returns void
     """
+    RecurseParse("Tracks", CurrentROrder)
     RecurseParse("SavedSongs", CurrentROrder)
     RecurseParse("SavedAlbums", CurrentROrder)
     RecurseParse("Playlists", CurrentROrder)
@@ -695,6 +725,13 @@ def ParseJsonsToCollectedId(keyword):
 
 def RecurseParse(kind, CurrentROrder):
     resourceType = ""
+    if kind == "Tracks":
+        resourceType = "tracks"
+        listOfTrackFiles = os.listdir(dirs[resourceType])
+        listOfTrackFiles.sort(key=natural_sort_key)
+        for j in listOfTrackFiles:
+            fname = os.path.join(dirs[resourceType], j)
+            ParseTracksToStaging(fname, CurrentROrder)
     if kind == "SavedSongs":
         resourceType="savedtracks"
         listOfSavedSongFiles = os.listdir(dirs[resourceType])
@@ -788,6 +825,7 @@ def ConstructImageTuple(imgArray, resourceid, type):
 
 def InsertTrackRelinks(relinktuples):
     resourceType = "track"
+    print("Relinking: {}".format(relinktuples))
     q = "INSERT OR IGNORE INTO TrackRelinks(TrackId, UnavailableMarket, AvailableTrackId) VALUES (?, ?, ?);"
     c = conn.cursor()
     c.executemany(q, relinktuples)
@@ -886,6 +924,10 @@ def InsertTracks(listOfTracks):
 
         if linkedfrom is not None:
             tup = (linkedfrom['id'], CurrentUserMarket, trackid)
+            #StagedToAdd_TrackRelinks.append(tup)
+            # if tup[0] not in QueuedTracks and tup[0] not in CollectedTracks:
+            #     print("Track {} was not in Queued or Collected, but needed for Relink.".format(tup[0]))
+            #     QueuedTracks.append(tup[0])
             relinkTuples.append(tup)
         trackTuples.append((trackid, markets, disc, duration, explicit, href, playable, restrictions, name, popularity, prev, tracknumber, uri))
     c = conn.cursor()
