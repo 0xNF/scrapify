@@ -24,6 +24,8 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+import time
+from time import strftime, gmtime
 
 from spotipy import Spotify, client, oauth2, util
 
@@ -1302,9 +1304,6 @@ def InsertFollowedArtists(dictOfFollowedArtists):
     print("Inserted {} followed artists into database".format(len(FollowedTuples)))
     return
 
-def InsertAudioAnalyses(listOfAudioAnalyses):
-    return
-
 def InsertCategories(listOfCategories):
     catTuples = []
     imageTuples = []
@@ -1567,14 +1566,83 @@ def OrderLoop():
         CurrentROrder += 1
     return
 
+# Returns a list of tuples of the format (spotify track id, audio analysis json object)
+# Given a list of Spotify ids, get the audio-analysis object.
+# Due the endpoint being 1-only, we will certainly encounter a rate limit before we complete
+# Upon receipt of a 429, we return the retry-in header and quit the method
+# Each call of this method should be supplied a list of Ids that doesn't have an audio analysis stored
+# we recommend performing an EXCEPT over AudioFeaturs and AudioAnalyses:
+# SELECT TrackId FROM AudioFeatures EXCEPT SELECT TrackId FROM AudioAnalyses;
+def GetAudioAnalysesData(lSpotifyIds):
+    insertbuffer = []
+    retry = None
+    for idx,sid in enumerate(lSpotifyIds):
+        if idx % 25 == 0:
+            print ("{2}     Fetching {0} of {1}".format(idx, len(lSpotifyIds), time.strftime("%H:%M.%S", gmtime())))
+            print ("\t\t\tinserting previous batch into database...")
+            InsertAudioAnalyses(insertbuffer)
+            insertbuffer.clear()
+        try:
+            j = sp.audio_analysis(sid)
+            insertbuffer.append((sid, "'{0}'".format(json.dumps(j))))
+        except client.SpotifyException as se:
+            print ("{1}     encountered a rate limit after {0} fetches. Returning flow to database. Please finish the rest later.".format(idx, time.strftime("%H:%M.%S", gmtime())))
+            print(se)
+            break
+        except client.oauth2.SpotifyOauthError as oe:
+            print("{0}      OAuth token encountered an error - either expired and could not renew, or something else happened.".format(time.strftime("%H:%M.%S", gmtime())))
+            print(oe)
+            break
+        except:
+            print("{0}     Encountered an unhandled error.".format(time.strftime("%H:%M.%S", gmtime())))
+    return (retry, insertbuffer)
+
+# Returns a list of Spotify TrackIds that do not have Audio Analyses but do have Audio Features
+def GetSongsWithNoAnalysis():
+    lst = []
+    query = "SELECT TrackId FROM AudioFeatures EXCEPT SELECT TrackId FROM AudioAnalyses;"
+    c = conn.cursor()
+    for row in c.execute(query):
+        lst.append(row[0])
+    c.close()
+    print("Retrieved {0} songs with no audio-analyses from our local database.".format(len(lst)))
+    return lst
+
+# Inserts Audio Qualities
+def InsertAudioAnalyses(lAudioTuples):
+    if len(lAudioTuples) == 0:
+        return
+    print("\t\tAttempting to insert {0} new audio analysis records into our local database".format(len(lAudioTuples)))
+    query = "INSERT INTO AudioAnalyses (TrackId, Json) VALUES (?, ?);"
+    c = conn.cursor()
+    c.executemany(query, lAudioTuples)
+    conn.commit()
+    return
+
+def AudioAnalysisFetcher():
+    openids = GetSongsWithNoAnalysis()
+    retry,tuples = GetAudioAnalysesData(openids)
+    if retry:
+        print("Encountered rate limit. Attempting to insert {0} records. Retry-after expires in {1} seconds".format(len(tuples), retry))
+    InsertAudioAnalyses(tuples)
+
+def GetAudioTest(id):
+    ret = sp.audio_analysis(id)
+    print(ret)
+    return ret
+
 def main():
     global CurrentROrder
     RefreshSpotifyTokens()
     ScrapeSetup()
+    
     GetUser()
-    AcquireInitialJson()
-    PopulateAlreadySeenItems()
-    OrderLoop()
+
+    #AcquireInitialJson()
+    #PopulateAlreadySeenItems()
+    #OrderLoop()
+
+
     # RecurseParseAll()
     # InsertStagedAll()
     # # do another DQ items, do another RecurseParse, Insert.
@@ -1582,6 +1650,8 @@ def main():
     # RecurseParseAll()
     # InsertStagedAll()
     # CurrentROrder += 1
+
+    AudioAnalysisFetcher()
 
     return
 
